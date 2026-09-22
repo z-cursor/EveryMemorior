@@ -4,6 +4,9 @@ import { publishCompanionEvent, companionEventKey } from "@/lib/companion-events
 import { abortTenantCompanionTurn, getCompanionSession, runTenantCompanionTurn } from "@/lib/companion-service";
 import { requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
 import { getTenantStore } from "@/lib/tenant-store";
+import { pruneCompanionRawMessages, scheduleCompanionRetentionSweep } from "@/lib/companion-retention";
+import { getRpcSession } from "@/lib/rpc-manager";
+import { scheduleCompanionContinuityWorker } from "@/lib/companion-continuity";
 
 export const dynamic = "force-dynamic";
 
@@ -14,20 +17,31 @@ function contextFor(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    const { auth, store } = contextFor(request);
+    const { auth, key, store } = contextFor(request);
+    const context = { tenantId: auth.tenant.id, membershipId: auth.membership.id };
+    let assignment = store.getCompanionAssignment(context);
+    const existingPath = assignment ? await resolveSessionPath(assignment.sessionId) : null;
+    const retention = existingPath && !getRpcSession(assignment!.sessionId)?.isAlive()
+      ? pruneCompanionRawMessages(store, context, existingPath)
+      : { removedEntryIds: [], confirmedMemoryIds: [] };
     const session = await getCompanionSession(auth);
-    const assignment = store.getCompanionAssignment({ tenantId: auth.tenant.id, membershipId: auth.membership.id });
+    scheduleCompanionRetentionSweep(store);
+    scheduleCompanionContinuityWorker(store, context, `companion-${process.pid}`, (event, clientMessageId) => {
+      if (clientMessageId) publishCompanionEvent(key, { ...event, clientMessageId });
+    }, 250);
+    assignment = store.getCompanionAssignment(context);
     const config = assignment ? store.getCompanionConfigVersion(auth.tenant.id, assignment.configVersionId) : null;
     const path = assignment ? await resolveSessionPath(assignment.sessionId) : null;
-    const history = path
-      ? buildSessionContext(getSessionEntries(path), null, { tail: 100 }).messages.flatMap((message) => {
+    const loadedContext = path ? buildSessionContext(getSessionEntries(path), null, { tail: 100 }) : null;
+    const history = loadedContext
+      ? loadedContext.messages.flatMap((message, index) => {
           if (message.role !== "user" && message.role !== "assistant") return [];
           const text = typeof message.content === "string"
             ? message.content
             : Array.isArray(message.content)
               ? message.content.flatMap((block) => block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string" ? [block.text] : []).join("")
               : "";
-          return text ? [{ role: message.role, text }] : [];
+          return text ? [{ role: message.role, text, entryId: loadedContext.entryIds[index] }] : [];
         })
       : [];
     void session;
@@ -36,6 +50,7 @@ export async function GET(request: Request) {
       assignment: assignment ? { sessionId: assignment.sessionId, configVersionId: assignment.configVersionId, assignedAt: assignment.assignedAt } : null,
       config: config ? { version: config.version, publishedAt: config.publishedAt } : null,
       history,
+      retention,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const status = error instanceof TenantAuthenticationError ? error.status : 500;
@@ -45,7 +60,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const { auth, key } = contextFor(request);
+    const { auth, key, store } = contextFor(request);
+    scheduleCompanionRetentionSweep(store);
     const body = await request.json() as { action?: unknown; clientMessageId?: unknown; text?: unknown };
     if (body.action === "stop") {
       abortTenantCompanionTurn(auth);

@@ -3,8 +3,9 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { containsProhibitedCompanionProfileContent, containsSensitiveCompanionInformation, normalizedOrdinaryCompanionMemory, ordinaryCompanionTopics } from "./companion-memory-policy";
 
-export const TENANT_SCHEMA_VERSION = 5;
+export const TENANT_SCHEMA_VERSION = 6;
 
 export type TenantStatus = "active" | "suspended";
 export type UserStatus = "active" | "disabled";
@@ -15,6 +16,16 @@ export type TenantSkillStatus = "draft" | "pending_review" | "published" | "susp
 export type CompanionConfigStatus = "draft" | "published" | "archived";
 export type CompanionTurnStatus = "running" | "completed" | "incomplete" | "rejected" | "failed";
 export type CompanionClassification = "ordinary" | "current_fact" | "sensitive" | "professional" | "urgent_danger" | "abnormal";
+export type CompanionMemoryStatus = "pending_confirmation" | "confirmed" | "deleted";
+export type CompanionMemorySensitivity = "ordinary" | "sensitive";
+export const COMPANION_PROFILE_FIELD_NAMES = [
+  "form_of_address", "reply_length", "question_preference", "topics", "humor",
+  "advice_preference", "boundaries", "familiarity",
+] as const;
+export type CompanionProfileFieldName = typeof COMPANION_PROFILE_FIELD_NAMES[number];
+export type CompanionProfileSource = "explicit" | "inferred" | "enterprise";
+export type CompanionBackgroundJobStatus = "pending" | "leased" | "completed" | "failed";
+export type CompanionBackgroundJobType = "memory_profile" | "fragment_summary";
 
 export interface Tenant {
   id: string;
@@ -187,6 +198,74 @@ export interface CompanionTurnRecord {
   firstVisibleAt: string | null;
   completedAt: string | null;
   createdAt: string;
+}
+
+export interface CompanionConsent {
+  tenantId: string;
+  membershipId: string;
+  memoryEnabled: boolean;
+  optedInAt: string | null;
+  revokedAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface CompanionMemory {
+  id: string;
+  tenantId: string;
+  membershipId: string;
+  content: string;
+  status: CompanionMemoryStatus;
+  sensitivity: CompanionMemorySensitivity;
+  sourceEntryId: string;
+  createdAt: string;
+  updatedAt: string;
+  confirmedAt: string | null;
+  deletedAt: string | null;
+  receipt: { reversible: true };
+}
+
+export interface CompanionProfileField {
+  tenantId: string;
+  membershipId: string;
+  field: CompanionProfileFieldName;
+  value: string;
+  source: CompanionProfileSource;
+  confidence: number;
+  evidenceCount: number;
+  sourceLabel: string | null;
+  updatedAt: string;
+}
+
+export interface CompanionFragment {
+  id: string;
+  tenantId: string;
+  membershipId: string;
+  sessionId: string;
+  startEntryId: string;
+  endEntryId: string;
+  sourceEntryIds: string[];
+  summary: string;
+  createdAt: string;
+}
+
+export interface CompanionBackgroundJob {
+  id: string;
+  tenantId: string;
+  membershipId: string;
+  type: CompanionBackgroundJobType;
+  payload: Record<string, unknown>;
+  status: CompanionBackgroundJobStatus;
+  attempts: number;
+  availableAt: string;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CompanionRetentionTarget extends TenantContext {
+  sessionId: string;
 }
 
 type SqlRow = Record<string, SQLInputValue>;
@@ -469,6 +548,111 @@ CREATE TABLE IF NOT EXISTS companion_turns (
 CREATE INDEX IF NOT EXISTS companion_turns_membership_idx ON companion_turns(tenant_id, membership_id, created_at DESC);
 `;
 
+const MIGRATION_6 = `
+CREATE TABLE IF NOT EXISTS companion_consents (
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  memory_enabled INTEGER NOT NULL DEFAULT 0 CHECK (memory_enabled IN (0, 1)),
+  opted_in_at TEXT,
+  revoked_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, membership_id),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS companion_memories (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_digest TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending_confirmation', 'confirmed', 'deleted')),
+  sensitivity TEXT NOT NULL CHECK (sensitivity IN ('ordinary', 'sensitive')),
+  source_entry_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  confirmed_at TEXT,
+  deleted_at TEXT,
+  UNIQUE (tenant_id, id),
+  UNIQUE (tenant_id, membership_id, content_digest),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_memories_member_idx ON companion_memories(tenant_id, membership_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS companion_profile_fields (
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  field TEXT NOT NULL CHECK (field IN ('form_of_address', 'reply_length', 'question_preference', 'topics', 'humor', 'advice_preference', 'boundaries', 'familiarity')),
+  value TEXT NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('explicit', 'inferred', 'enterprise')),
+  confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+  evidence_count INTEGER NOT NULL DEFAULT 0 CHECK (evidence_count >= 0),
+  source_label TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, membership_id, field),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS companion_profile_evidence (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  field TEXT NOT NULL,
+  value TEXT NOT NULL,
+  source_entry_id TEXT NOT NULL,
+  source_text TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (tenant_id, membership_id, field, value, source_entry_id),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_profile_evidence_member_idx ON companion_profile_evidence(tenant_id, membership_id, field, value);
+
+CREATE TABLE IF NOT EXISTS companion_fragments (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  start_entry_id TEXT NOT NULL,
+  end_entry_id TEXT NOT NULL,
+  source_entry_ids_json TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (tenant_id, id),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_fragments_member_idx ON companion_fragments(tenant_id, membership_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS companion_background_jobs (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'leased', 'completed', 'failed')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  available_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (tenant_id, id),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_jobs_available_idx ON companion_background_jobs(tenant_id, membership_id, status, available_at);
+
+CREATE TABLE IF NOT EXISTS companion_memory_feedback (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  memory_id TEXT NOT NULL,
+  correct INTEGER NOT NULL CHECK (correct IN (0, 1)),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, memory_id) REFERENCES companion_memories(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+`;
+
 function requiredText(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${field} is required`);
@@ -599,6 +783,70 @@ function mapCompanionTurn(row: SqlRow): CompanionTurnRecord {
     firstVisibleAt: row.first_visible_at as string | null, completedAt: row.completed_at as string | null,
     createdAt: asString(row, "created_at"),
   };
+}
+
+function mapCompanionMemory(row: SqlRow): CompanionMemory {
+  return {
+    id: asString(row, "id"), tenantId: asString(row, "tenant_id"), membershipId: asString(row, "membership_id"),
+    content: asString(row, "content"), status: asString(row, "status") as CompanionMemoryStatus,
+    sensitivity: asString(row, "sensitivity") as CompanionMemorySensitivity,
+    sourceEntryId: asString(row, "source_entry_id"), createdAt: asString(row, "created_at"),
+    updatedAt: asString(row, "updated_at"), confirmedAt: row.confirmed_at as string | null,
+    deletedAt: row.deleted_at as string | null, receipt: { reversible: true },
+  };
+}
+
+function mapCompanionProfileField(row: SqlRow): CompanionProfileField {
+  return {
+    tenantId: asString(row, "tenant_id"), membershipId: asString(row, "membership_id"),
+    field: asString(row, "field") as CompanionProfileFieldName, value: asString(row, "value"),
+    source: asString(row, "source") as CompanionProfileSource, confidence: Number(row.confidence),
+    evidenceCount: Number(row.evidence_count), sourceLabel: row.source_label as string | null,
+    updatedAt: asString(row, "updated_at"),
+  };
+}
+
+function mapCompanionBackgroundJob(row: SqlRow): CompanionBackgroundJob {
+  return {
+    id: asString(row, "id"), tenantId: asString(row, "tenant_id"), membershipId: asString(row, "membership_id"),
+    type: asString(row, "type") as CompanionBackgroundJobType, payload: JSON.parse(asString(row, "payload_json")) as Record<string, unknown>,
+    status: asString(row, "status") as CompanionBackgroundJobStatus, attempts: Number(row.attempts),
+    availableAt: asString(row, "available_at"), leaseOwner: row.lease_owner as string | null,
+    leaseExpiresAt: row.lease_expires_at as string | null, lastError: row.last_error as string | null,
+    createdAt: asString(row, "created_at"), updatedAt: asString(row, "updated_at"),
+  };
+}
+
+const COMPANION_PROFILE_FIELDS = new Set<CompanionProfileFieldName>(COMPANION_PROFILE_FIELD_NAMES);
+
+function companionProfileField(value: string): CompanionProfileFieldName {
+  if (!COMPANION_PROFILE_FIELDS.has(value as CompanionProfileFieldName)) throw new Error("Invalid Companion Profile field");
+  return value as CompanionProfileFieldName;
+}
+
+function normalizedCompanionProfileValue(field: CompanionProfileFieldName, rawValue: string): string {
+  const value = requiredText(rawValue, "profile.value");
+  if (containsProhibitedCompanionProfileContent(value)) throw new Error("Sensitive or prohibited information cannot be stored in the Companion Profile");
+  if (field === "topics") {
+    const topics = ordinaryCompanionTopics(value);
+    if (topics.length === 0) throw new Error("Profile topics must be an ordinary allowed topic");
+    return topics.join("、");
+  }
+  const choices: Partial<Record<CompanionProfileFieldName, Array<[RegExp, string]>>> = {
+    reply_length: [[/short|短|简短|精简/iu, "short"], [/detailed|long|详细|多说/iu, "detailed"]],
+    question_preference: [[/few|少问|别问|不追问/iu, "few"], [/more|多问|多追问/iu, "more"], [/normal|正常/iu, "normal"]],
+    humor: [[/none|不幽默|不开玩笑/iu, "none"], [/light|轻松|偶尔/iu, "light"], [/more|幽默|开玩笑/iu, "more"]],
+    advice_preference: [[/ask_first|先问|先征求/iu, "ask_first"], [/requested|需要时|我问时/iu, "when_requested"], [/none|不要建议/iu, "none"]],
+    boundaries: [[/no_questions|不追问|别追问/iu, "no_follow_up_questions"], [/no_advice|不要建议/iu, "no_unsolicited_advice"], [/no_humor|不开玩笑/iu, "no_humor"]],
+    familiarity: [[/new|陌生|刚认识/iu, "new"], [/warm|熟悉|亲切/iu, "warm"], [/familiar|很熟|老朋友/iu, "familiar"]],
+  };
+  const fieldChoices = choices[field];
+  if (fieldChoices) {
+    const normalized = fieldChoices.find(([pattern]) => pattern.test(value))?.[1];
+    if (!normalized) throw new Error(`Invalid Companion Profile value for ${field}`);
+    return normalized;
+  }
+  return value;
 }
 
 export function getTenantDatabasePath(): string {
@@ -1248,6 +1496,17 @@ export class TenantStore {
     return row ? mapCompanionAssignment(row) : null;
   }
 
+  listCompanionRetentionTargets(): CompanionRetentionTarget[] {
+    const rows = this.database.prepare(`SELECT tenant_id, membership_id, session_id
+      FROM companion_assignments`)
+      .all() as SqlRow[];
+    return rows.map((row) => ({
+      tenantId: asString(row, "tenant_id"),
+      membershipId: asString(row, "membership_id"),
+      sessionId: asString(row, "session_id"),
+    }));
+  }
+
   ensureCompanionAssignment(context: TenantContext, sessionId: string): CompanionAssignment {
     const membership = this.requireActiveMembership(context);
     const existing = this.getCompanionAssignment(context);
@@ -1321,6 +1580,424 @@ export class TenantStore {
       .get(context.tenantId, context.membershipId, turnId) as SqlRow | undefined;
     if (!row) throw new Error("Companion turn not found");
     return mapCompanionTurn(row);
+  }
+
+  getCompanionConsent(context: TenantContext): CompanionConsent {
+    this.requireActiveMembership(context);
+    const row = this.database.prepare("SELECT * FROM companion_consents WHERE tenant_id = ? AND membership_id = ?")
+      .get(context.tenantId, context.membershipId) as SqlRow | undefined;
+    return row ? {
+      tenantId: asString(row, "tenant_id"), membershipId: asString(row, "membership_id"),
+      memoryEnabled: Boolean(row.memory_enabled), optedInAt: row.opted_in_at as string | null,
+      revokedAt: row.revoked_at as string | null, updatedAt: asString(row, "updated_at"),
+    } : { tenantId: context.tenantId, membershipId: context.membershipId, memoryEnabled: false, optedInAt: null, revokedAt: null, updatedAt: null };
+  }
+
+  setCompanionMemoryConsent(context: TenantContext, enabled: boolean): CompanionConsent {
+    const actor = this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_consents
+      (tenant_id, membership_id, memory_enabled, opted_in_at, revoked_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (tenant_id, membership_id) DO UPDATE SET
+        memory_enabled = excluded.memory_enabled,
+        opted_in_at = CASE WHEN excluded.memory_enabled = 1 THEN COALESCE(companion_consents.opted_in_at, excluded.opted_in_at) ELSE companion_consents.opted_in_at END,
+        revoked_at = excluded.revoked_at,
+        updated_at = excluded.updated_at`)
+      .run(context.tenantId, context.membershipId, enabled ? 1 : 0, enabled ? now : null, enabled ? null : now, now);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, enabled ? "companion.memory.opted_in" : "companion.memory.revoked", "companion_consent", context.membershipId, now);
+    return this.getCompanionConsent(context);
+  }
+
+  saveCompanionMemory(context: TenantContext, input: {
+    content: string; sensitivity: CompanionMemorySensitivity; sourceEntryId: string;
+  }): CompanionMemory {
+    this.requireActiveMembership(context);
+    if (!this.getCompanionConsent(context).memoryEnabled) throw new Error("Long-term memory consent is required");
+    const content = requiredText(input.content, "memory.content");
+    const sourceEntryId = requiredText(input.sourceEntryId, "memory.sourceEntryId");
+    const digest = createHash("sha256").update(content.toLocaleLowerCase()).digest("hex");
+    const existing = this.database.prepare(`SELECT * FROM companion_memories
+      WHERE tenant_id = ? AND membership_id = ? AND content_digest = ?`)
+      .get(context.tenantId, context.membershipId, digest) as SqlRow | undefined;
+    if (existing && asString(existing, "status") !== "deleted") return mapCompanionMemory(existing);
+    const now = new Date().toISOString();
+    const status: CompanionMemoryStatus = input.sensitivity === "sensitive" ? "pending_confirmation" : "confirmed";
+    const id = existing ? asString(existing, "id") : randomUUID();
+    this.database.prepare(`INSERT INTO companion_memories
+      (id, tenant_id, membership_id, content, content_digest, status, sensitivity, source_entry_id, created_at, updated_at, confirmed_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      ON CONFLICT (tenant_id, membership_id, content_digest) DO UPDATE SET
+        content = excluded.content, status = excluded.status, sensitivity = excluded.sensitivity,
+        source_entry_id = excluded.source_entry_id, updated_at = excluded.updated_at,
+        confirmed_at = excluded.confirmed_at, deleted_at = NULL`)
+      .run(id, context.tenantId, context.membershipId, content, digest, status, input.sensitivity, sourceEntryId, now, now, status === "confirmed" ? now : null);
+    return mapCompanionMemory(this.database.prepare("SELECT * FROM companion_memories WHERE tenant_id = ? AND id = ?").get(context.tenantId, id) as SqlRow);
+  }
+
+  listCompanionMemories(context: TenantContext, includeDeleted = false): CompanionMemory[] {
+    this.requireActiveMembership(context);
+    const rows = this.database.prepare(`SELECT * FROM companion_memories
+      WHERE tenant_id = ? AND membership_id = ? ${includeDeleted ? "" : "AND status <> 'deleted'"}
+      ORDER BY updated_at DESC`).all(context.tenantId, context.membershipId) as SqlRow[];
+    return rows.map(mapCompanionMemory);
+  }
+
+  listUsableCompanionMemories(context: TenantContext): CompanionMemory[] {
+    if (!this.getCompanionConsent(context).memoryEnabled) return [];
+    return this.listCompanionMemories(context).filter((memory) => memory.status === "confirmed");
+  }
+
+  listConfirmedCompanionMemoriesForSource(context: TenantContext, sourceEntryId: string): CompanionMemory[] {
+    this.requireActiveMembership(context);
+    const rows = this.database.prepare(`SELECT * FROM companion_memories
+      WHERE tenant_id = ? AND membership_id = ? AND source_entry_id = ? AND status = 'confirmed'
+      ORDER BY updated_at DESC`).all(context.tenantId, context.membershipId, sourceEntryId) as SqlRow[];
+    return rows.map(mapCompanionMemory);
+  }
+
+  confirmCompanionMemory(context: TenantContext, memoryId: string): CompanionMemory {
+    this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    const result = this.database.prepare(`UPDATE companion_memories SET status = 'confirmed', confirmed_at = ?, updated_at = ?
+      WHERE tenant_id = ? AND membership_id = ? AND id = ? AND status = 'pending_confirmation'`)
+      .run(now, now, context.tenantId, context.membershipId, memoryId);
+    if (result.changes !== 1) throw new Error("Pending companion memory not found");
+    return mapCompanionMemory(this.database.prepare("SELECT * FROM companion_memories WHERE tenant_id = ? AND id = ?").get(context.tenantId, memoryId) as SqlRow);
+  }
+
+  correctCompanionMemory(context: TenantContext, memoryId: string, content: string): CompanionMemory {
+    const actor = this.requireActiveMembership(context);
+    const current = this.database.prepare(`SELECT * FROM companion_memories
+      WHERE tenant_id = ? AND membership_id = ? AND id = ? AND status <> 'deleted'`)
+      .get(context.tenantId, context.membershipId, memoryId) as SqlRow | undefined;
+    if (!current) throw new Error("Companion memory not found");
+    const now = new Date().toISOString();
+    const corrected = this.transaction(() => {
+      this.database.prepare("UPDATE companion_memories SET status = 'deleted', deleted_at = ?, updated_at = ? WHERE tenant_id = ? AND id = ?")
+        .run(now, now, context.tenantId, memoryId);
+      const normalizedOrdinary = normalizedOrdinaryCompanionMemory(content);
+      const sensitivity: CompanionMemorySensitivity = containsSensitiveCompanionInformation(content) || !normalizedOrdinary
+        ? "sensitive" : "ordinary";
+      return this.saveCompanionMemory(context, {
+        content: sensitivity === "ordinary" ? normalizedOrdinary! : content,
+        sensitivity,
+        sourceEntryId: asString(current, "source_entry_id"),
+      });
+    });
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.memory.corrected", "companion_memory", memoryId, now);
+    return corrected;
+  }
+
+  deleteCompanionMemory(context: TenantContext, memoryId: string): void {
+    const actor = this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    const result = this.database.prepare(`UPDATE companion_memories SET status = 'deleted', deleted_at = ?, updated_at = ?
+      WHERE tenant_id = ? AND membership_id = ? AND id = ? AND status <> 'deleted'`)
+      .run(now, now, context.tenantId, context.membershipId, memoryId);
+    if (result.changes !== 1) throw new Error("Companion memory not found");
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.memory.deleted", "companion_memory", memoryId, now);
+  }
+
+  resetCompanionMemories(context: TenantContext): void {
+    const actor = this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    this.database.prepare(`UPDATE companion_memories SET status = 'deleted', deleted_at = ?, updated_at = ?
+      WHERE tenant_id = ? AND membership_id = ? AND status <> 'deleted'`).run(now, now, context.tenantId, context.membershipId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.memory.reset", "companion_memory", context.membershipId, now);
+  }
+
+  listCompanionProfileFields(context: TenantContext): CompanionProfileField[] {
+    this.requireActiveMembership(context);
+    const rows = this.database.prepare(`SELECT * FROM companion_profile_fields
+      WHERE tenant_id = ? AND membership_id = ? ORDER BY field`)
+      .all(context.tenantId, context.membershipId) as SqlRow[];
+    return rows.map(mapCompanionProfileField);
+  }
+
+  setCompanionProfileField(context: TenantContext, input: {
+    field: string; value: string; source: CompanionProfileSource; confidence: number; evidenceCount?: number; sourceLabel?: string | null;
+  }): CompanionProfileField {
+    const actor = this.requireActiveMembership(context);
+    const field = companionProfileField(input.field);
+    const value = normalizedCompanionProfileValue(field, input.value);
+    if (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1) throw new Error("profile confidence must be between 0 and 1");
+    const evidenceCount = input.evidenceCount ?? 0;
+    if (input.source === "inferred" && evidenceCount < 2) throw new Error("Inferred profile fields require repeated evidence");
+    if (input.source === "enterprise" && !input.sourceLabel?.trim()) throw new Error("Enterprise profile fields require a disclosed source");
+    const existing = this.database.prepare(`SELECT * FROM companion_profile_fields
+      WHERE tenant_id = ? AND membership_id = ? AND field = ?`).get(context.tenantId, context.membershipId, field) as SqlRow | undefined;
+    if (existing && asString(existing, "source") === "explicit" && input.source === "inferred") return mapCompanionProfileField(existing);
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_profile_fields
+      (tenant_id, membership_id, field, value, source, confidence, evidence_count, source_label, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (tenant_id, membership_id, field) DO UPDATE SET
+        value = excluded.value, source = excluded.source, confidence = excluded.confidence,
+        evidence_count = excluded.evidence_count, source_label = excluded.source_label, updated_at = excluded.updated_at`)
+      .run(context.tenantId, context.membershipId, field, value, input.source, input.confidence, evidenceCount, input.sourceLabel?.trim() || null, now);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.profile.updated", "companion_profile", field, now);
+    return mapCompanionProfileField(this.database.prepare(`SELECT * FROM companion_profile_fields
+      WHERE tenant_id = ? AND membership_id = ? AND field = ?`).get(context.tenantId, context.membershipId, field) as SqlRow);
+  }
+
+  recordCompanionProfileEvidence(context: TenantContext, input: {
+    field: string; value: string; sourceEntryId: string; sourceText: string;
+  }): CompanionProfileField | null {
+    this.requireActiveMembership(context);
+    const field = companionProfileField(input.field);
+    const value = normalizedCompanionProfileValue(field, input.value);
+    const sourceText = requiredText(input.sourceText, "profile.sourceText");
+    const sourceEntryId = requiredText(input.sourceEntryId, "profile.sourceEntryId");
+    this.database.prepare(`INSERT OR IGNORE INTO companion_profile_evidence
+      (id, tenant_id, membership_id, field, value, source_entry_id, source_text, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(randomUUID(), context.tenantId, context.membershipId, field, value, sourceEntryId, sourceText, new Date().toISOString());
+    const count = Number((this.database.prepare(`SELECT COUNT(*) AS count FROM companion_profile_evidence
+      WHERE tenant_id = ? AND membership_id = ? AND field = ? AND value = ?`)
+      .get(context.tenantId, context.membershipId, field, value) as SqlRow).count);
+    return count < 2 ? null : this.setCompanionProfileField(context, {
+      field, value, source: "inferred", confidence: Math.min(0.95, 0.5 + count * 0.15), evidenceCount: count,
+    });
+  }
+
+  deleteCompanionProfileField(context: TenantContext, fieldName: string): void {
+    const actor = this.requireActiveMembership(context);
+    const field = companionProfileField(fieldName);
+    this.database.prepare("DELETE FROM companion_profile_fields WHERE tenant_id = ? AND membership_id = ? AND field = ?")
+      .run(context.tenantId, context.membershipId, field);
+    this.database.prepare("DELETE FROM companion_profile_evidence WHERE tenant_id = ? AND membership_id = ? AND field = ?")
+      .run(context.tenantId, context.membershipId, field);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.profile.deleted", "companion_profile", field, new Date().toISOString());
+  }
+
+  resetCompanionProfile(context: TenantContext): void {
+    const actor = this.requireActiveMembership(context);
+    this.database.prepare("DELETE FROM companion_profile_fields WHERE tenant_id = ? AND membership_id = ?")
+      .run(context.tenantId, context.membershipId);
+    this.database.prepare("DELETE FROM companion_profile_evidence WHERE tenant_id = ? AND membership_id = ?")
+      .run(context.tenantId, context.membershipId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.profile.reset", "companion_profile", context.membershipId, new Date().toISOString());
+  }
+
+  addCompanionFragment(context: TenantContext, input: {
+    sessionId: string; startEntryId: string; endEntryId: string; sourceEntryIds?: string[]; summary: string;
+  }): CompanionFragment {
+    this.requireActiveMembership(context);
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_fragments
+      (id, tenant_id, membership_id, session_id, start_entry_id, end_entry_id, source_entry_ids_json, summary, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, context.tenantId, context.membershipId, requiredText(input.sessionId, "fragment.sessionId"),
+        requiredText(input.startEntryId, "fragment.startEntryId"), requiredText(input.endEntryId, "fragment.endEntryId"),
+        JSON.stringify(input.sourceEntryIds ?? [input.startEntryId, input.endEntryId]), requiredText(input.summary, "fragment.summary"), now);
+    return {
+      id, tenantId: context.tenantId, membershipId: context.membershipId, sessionId: input.sessionId,
+      startEntryId: input.startEntryId, endEntryId: input.endEntryId,
+      sourceEntryIds: input.sourceEntryIds ?? [input.startEntryId, input.endEntryId], summary: input.summary.trim(), createdAt: now,
+    };
+  }
+
+  listCompanionFragments(context: TenantContext, limit = 4): CompanionFragment[] {
+    this.requireActiveMembership(context);
+    const rows = this.database.prepare(`SELECT * FROM companion_fragments
+      WHERE tenant_id = ? AND membership_id = ? ORDER BY created_at DESC LIMIT ?`)
+      .all(context.tenantId, context.membershipId, Math.max(1, Math.min(20, Math.trunc(limit)))) as SqlRow[];
+    return rows.map((row) => ({
+      id: asString(row, "id"), tenantId: asString(row, "tenant_id"), membershipId: asString(row, "membership_id"),
+      sessionId: asString(row, "session_id"), startEntryId: asString(row, "start_entry_id"),
+      endEntryId: asString(row, "end_entry_id"), sourceEntryIds: JSON.parse(asString(row, "source_entry_ids_json")) as string[],
+      summary: asString(row, "summary"), createdAt: asString(row, "created_at"),
+    }));
+  }
+
+  updateCompanionFragment(context: TenantContext, fragmentId: string, summary: string): CompanionFragment {
+    const actor = this.requireActiveMembership(context);
+    const value = requiredText(summary, "fragment.summary");
+    if (containsSensitiveCompanionInformation(value) || ordinaryCompanionTopics(value).length === 0) {
+      throw new Error("Fragment summaries may contain only ordinary, non-sensitive topics");
+    }
+    const normalizedSummary = `较早聊过与${ordinaryCompanionTopics(value).join("、")}相关的日常兴趣。`;
+    const result = this.database.prepare(`UPDATE companion_fragments SET summary = ?
+      WHERE tenant_id = ? AND membership_id = ? AND id = ?`)
+      .run(normalizedSummary, context.tenantId, context.membershipId, fragmentId);
+    if (result.changes !== 1) throw new Error("Companion fragment not found");
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.fragment.corrected", "companion_fragment", fragmentId, new Date().toISOString());
+    return this.listCompanionFragments(context, 20).find((fragment) => fragment.id === fragmentId)!;
+  }
+
+  deleteCompanionFragment(context: TenantContext, fragmentId: string): void {
+    const actor = this.requireActiveMembership(context);
+    const result = this.database.prepare(`DELETE FROM companion_fragments
+      WHERE tenant_id = ? AND membership_id = ? AND id = ?`)
+      .run(context.tenantId, context.membershipId, fragmentId);
+    if (result.changes !== 1) throw new Error("Companion fragment not found");
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.fragment.deleted", "companion_fragment", fragmentId, new Date().toISOString());
+  }
+
+  resetCompanionFragments(context: TenantContext): void {
+    const actor = this.requireActiveMembership(context);
+    this.database.prepare("DELETE FROM companion_fragments WHERE tenant_id = ? AND membership_id = ?")
+      .run(context.tenantId, context.membershipId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.fragment.reset", "companion_fragment", context.membershipId, new Date().toISOString());
+  }
+
+  removeCompanionSourceData(
+    context: TenantContext,
+    entryIds: readonly string[],
+    removeConfirmedMemories = false,
+    operation: "member" | "retention" = "member",
+  ): { confirmedMemoryIds: string[] } {
+    if (operation === "member") this.requireActiveMembership(context);
+    else {
+      const membership = this.database.prepare(`SELECT 1 FROM tenant_memberships
+        WHERE tenant_id = ? AND id = ?`).get(context.tenantId, context.membershipId);
+      if (!membership) throw new Error("Tenant membership not found");
+    }
+    const ids = [...new Set(entryIds.map((id) => id.trim()).filter(Boolean))];
+    if (ids.length === 0) return { confirmedMemoryIds: [] };
+    const placeholders = ids.map(() => "?").join(", ");
+    return this.transaction(() => {
+      const confirmedRows = this.database.prepare(`SELECT id FROM companion_memories
+        WHERE tenant_id = ? AND membership_id = ? AND source_entry_id IN (${placeholders}) AND status = 'confirmed'`)
+        .all(context.tenantId, context.membershipId, ...ids) as SqlRow[];
+      const confirmedMemoryIds = confirmedRows.map((row) => asString(row, "id"));
+      const now = new Date().toISOString();
+      this.database.prepare(`UPDATE companion_memories SET status = 'deleted', deleted_at = ?, updated_at = ?
+        WHERE tenant_id = ? AND membership_id = ? AND source_entry_id IN (${placeholders})
+          AND (status = 'pending_confirmation' OR ? = 1)`)
+        .run(now, now, context.tenantId, context.membershipId, ...ids, removeConfirmedMemories ? 1 : 0);
+      this.database.prepare(`DELETE FROM companion_profile_evidence
+        WHERE tenant_id = ? AND membership_id = ? AND source_entry_id IN (${placeholders})`)
+        .run(context.tenantId, context.membershipId, ...ids);
+      const inferred = this.database.prepare(`SELECT field, value FROM companion_profile_fields
+        WHERE tenant_id = ? AND membership_id = ? AND source = 'inferred'`)
+        .all(context.tenantId, context.membershipId) as SqlRow[];
+      for (const field of inferred) {
+        const count = Number((this.database.prepare(`SELECT COUNT(*) AS count FROM companion_profile_evidence
+          WHERE tenant_id = ? AND membership_id = ? AND field = ? AND value = ?`)
+          .get(context.tenantId, context.membershipId, field.field, field.value) as SqlRow).count);
+        if (count < 2) this.database.prepare(`DELETE FROM companion_profile_fields
+          WHERE tenant_id = ? AND membership_id = ? AND field = ? AND source = 'inferred'`)
+          .run(context.tenantId, context.membershipId, field.field);
+        else this.database.prepare(`UPDATE companion_profile_fields SET evidence_count = ?, confidence = ?, updated_at = ?
+          WHERE tenant_id = ? AND membership_id = ? AND field = ? AND source = 'inferred'`)
+          .run(count, Math.min(0.95, 0.5 + count * 0.15), now, context.tenantId, context.membershipId, field.field);
+      }
+      const fragments = (this.database.prepare(`SELECT * FROM companion_fragments
+        WHERE tenant_id = ? AND membership_id = ?`).all(context.tenantId, context.membershipId) as SqlRow[]).map((row) => ({
+          id: asString(row, "id"),
+          sourceEntryIds: JSON.parse(asString(row, "source_entry_ids_json")) as string[],
+        }));
+      for (const fragment of fragments) {
+        if (fragment.sourceEntryIds.some((id) => ids.includes(id))) {
+          this.database.prepare("DELETE FROM companion_fragments WHERE tenant_id = ? AND membership_id = ? AND id = ?")
+            .run(context.tenantId, context.membershipId, fragment.id);
+        }
+      }
+      const pendingJobs = this.database.prepare(`SELECT id, payload_json FROM companion_background_jobs
+        WHERE tenant_id = ? AND membership_id = ? AND status IN ('pending', 'leased')`)
+        .all(context.tenantId, context.membershipId) as SqlRow[];
+      for (const job of pendingJobs) {
+        const payload = JSON.parse(asString(job, "payload_json")) as { sourceEntryId?: unknown; sourceEntryIds?: unknown };
+        const sourceEntryIds = [
+          ...(typeof payload.sourceEntryId === "string" ? [payload.sourceEntryId] : []),
+          ...(Array.isArray(payload.sourceEntryIds) ? payload.sourceEntryIds.filter((id): id is string => typeof id === "string") : []),
+        ];
+        if (sourceEntryIds.some((id) => ids.includes(id))) {
+          this.database.prepare(`UPDATE companion_background_jobs SET status = 'failed', last_error = 'source_deleted',
+            lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE tenant_id = ? AND id = ?`)
+            .run(now, context.tenantId, job.id);
+        }
+      }
+      return { confirmedMemoryIds };
+    });
+  }
+
+  recordCompanionMemoryFeedback(context: TenantContext, memoryId: string, correct: boolean): void {
+    this.requireActiveMembership(context);
+    const owned = this.database.prepare(`SELECT 1 FROM companion_memories
+      WHERE tenant_id = ? AND membership_id = ? AND id = ?`).get(context.tenantId, context.membershipId, memoryId);
+    if (!owned) throw new Error("Companion memory not found");
+    this.database.prepare(`INSERT INTO companion_memory_feedback
+      (id, tenant_id, membership_id, memory_id, correct, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(randomUUID(), context.tenantId, context.membershipId, memoryId, correct ? 1 : 0, new Date().toISOString());
+  }
+
+  getCompanionMemoryErrorMeasurement(context: TenantContext): { total: number; errors: number; errorRate: number | null } {
+    this.requireActiveMembership(context);
+    const row = this.database.prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END), 0) AS errors
+      FROM companion_memory_feedback WHERE tenant_id = ? AND membership_id = ?`)
+      .get(context.tenantId, context.membershipId) as SqlRow;
+    const total = Number(row.total);
+    const errors = Number(row.errors);
+    return { total, errors, errorRate: total ? errors / total : null };
+  }
+
+  enqueueCompanionBackgroundJob(context: TenantContext, input: { type: CompanionBackgroundJobType; payload: Record<string, unknown>; availableAt?: string }): CompanionBackgroundJob {
+    this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    this.database.prepare(`INSERT INTO companion_background_jobs
+      (id, tenant_id, membership_id, type, payload_json, status, attempts, available_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`)
+      .run(id, context.tenantId, context.membershipId, requiredText(input.type, "job.type"), JSON.stringify(input.payload), input.availableAt ?? now, now, now);
+    return mapCompanionBackgroundJob(this.database.prepare("SELECT * FROM companion_background_jobs WHERE tenant_id = ? AND id = ?").get(context.tenantId, id) as SqlRow);
+  }
+
+  leaseCompanionBackgroundJob(
+    context: TenantContext,
+    workerId: string,
+    leaseMs: number,
+    jobTypes?: readonly CompanionBackgroundJobType[],
+  ): CompanionBackgroundJob | null {
+    this.requireActiveMembership(context);
+    const owner = requiredText(workerId, "workerId");
+    const now = new Date().toISOString();
+    const expires = new Date(Date.now() + Math.max(1, leaseMs)).toISOString();
+    return this.transaction(() => {
+      const typeClause = jobTypes?.length ? ` AND type IN (${jobTypes.map(() => "?").join(", ")})` : "";
+      const row = this.database.prepare(`SELECT * FROM companion_background_jobs
+        WHERE tenant_id = ? AND membership_id = ? AND available_at <= ?
+          AND (status = 'pending' OR (status = 'leased' AND lease_expires_at <= ?))
+          ${typeClause}
+        ORDER BY available_at, created_at LIMIT 1`)
+        .get(context.tenantId, context.membershipId, now, now, ...(jobTypes ?? [])) as SqlRow | undefined;
+      if (!row) return null;
+      const id = asString(row, "id");
+      this.database.prepare(`UPDATE companion_background_jobs SET status = 'leased', lease_owner = ?, lease_expires_at = ?, updated_at = ?
+        WHERE tenant_id = ? AND membership_id = ? AND id = ?`).run(owner, expires, now, context.tenantId, context.membershipId, id);
+      return mapCompanionBackgroundJob(this.database.prepare("SELECT * FROM companion_background_jobs WHERE tenant_id = ? AND id = ?").get(context.tenantId, id) as SqlRow);
+    });
+  }
+
+  completeCompanionBackgroundJob(context: TenantContext, jobId: string): CompanionBackgroundJob {
+    this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    const result = this.database.prepare(`UPDATE companion_background_jobs SET status = 'completed', payload_json = '{}', lease_owner = NULL,
+      lease_expires_at = NULL, updated_at = ? WHERE tenant_id = ? AND membership_id = ? AND id = ? AND status = 'leased'`)
+      .run(now, context.tenantId, context.membershipId, jobId);
+    if (result.changes !== 1) throw new Error("Leased companion background job not found");
+    return mapCompanionBackgroundJob(this.database.prepare("SELECT * FROM companion_background_jobs WHERE tenant_id = ? AND id = ?").get(context.tenantId, jobId) as SqlRow);
+  }
+
+  failCompanionBackgroundJob(context: TenantContext, jobId: string, error: string, retryDelayMs: number): CompanionBackgroundJob {
+    this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    const availableAt = new Date(Date.now() + Math.max(0, retryDelayMs)).toISOString();
+    const current = this.database.prepare(`SELECT attempts FROM companion_background_jobs
+      WHERE tenant_id = ? AND membership_id = ? AND id = ? AND status = 'leased'`)
+      .get(context.tenantId, context.membershipId, jobId) as SqlRow | undefined;
+    if (!current) throw new Error("Leased companion background job not found");
+    const attempts = Number(current.attempts) + 1;
+    const status: CompanionBackgroundJobStatus = attempts >= 5 ? "failed" : "pending";
+    this.database.prepare(`UPDATE companion_background_jobs SET status = ?, attempts = ?, available_at = ?,
+      lease_owner = NULL, lease_expires_at = NULL, last_error = ?, updated_at = ?
+      WHERE tenant_id = ? AND membership_id = ? AND id = ?`)
+      .run(status, attempts, availableAt, String(error).slice(0, 1000), now, context.tenantId, context.membershipId, jobId);
+    return mapCompanionBackgroundJob(this.database.prepare("SELECT * FROM companion_background_jobs WHERE tenant_id = ? AND id = ?").get(context.tenantId, jobId) as SqlRow);
   }
 
   ensureWorkspace(context: TenantContext, input: Omit<CreateWorkspaceInput, "slug">): Workspace {
@@ -1452,6 +2129,7 @@ export class TenantStore {
         this.database.exec(MIGRATION_3);
         this.database.exec(MIGRATION_4);
         this.database.exec(MIGRATION_5);
+        this.database.exec(MIGRATION_6);
         this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
       });
     } else if (current === 1) {
@@ -1460,6 +2138,7 @@ export class TenantStore {
         this.database.exec(MIGRATION_3);
         this.database.exec(MIGRATION_4);
         this.database.exec(MIGRATION_5);
+        this.database.exec(MIGRATION_6);
         this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
       });
     } else if (current === 2) {
@@ -1467,17 +2146,25 @@ export class TenantStore {
         this.database.exec(MIGRATION_3);
         this.database.exec(MIGRATION_4);
         this.database.exec(MIGRATION_5);
+        this.database.exec(MIGRATION_6);
         this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
       });
     } else if (current === 3) {
       this.transaction(() => {
         this.database.exec(MIGRATION_4);
         this.database.exec(MIGRATION_5);
+        this.database.exec(MIGRATION_6);
         this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
       });
     } else if (current === 4) {
       this.transaction(() => {
         this.database.exec(MIGRATION_5);
+        this.database.exec(MIGRATION_6);
+        this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
+      });
+    } else if (current === 5) {
+      this.transaction(() => {
+        this.database.exec(MIGRATION_6);
         this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
       });
     }

@@ -6,6 +6,8 @@ import type {
   CompanionTurnStatus,
   AuthenticatedTenantSession,
 } from "./tenant-store";
+import type { CompanionContinuityEvent } from "./companion-continuity";
+import { containsSensitiveCompanionInformation } from "./companion-memory-policy";
 
 export const COMPANION_PLATFORM_BASELINE = `
 你是凡小忆，一个明确披露为 AI 的文字陪伴伙伴。你不能假装真人，不能虚构身体、家庭、工作或亲身经历，也不能制造依赖、催促用户继续聊天，不能声称已经联系、定位、报警或救援。
@@ -16,6 +18,7 @@ export type CompanionContextMessage = {
   role: "user" | "assistant";
   text: string;
   status: "complete" | "incomplete" | "rejected";
+  source?: "memory" | "profile" | "summary" | "recent";
 };
 
 export type CompanionModelRequest = {
@@ -57,7 +60,8 @@ export type CompanionTurnEvent =
   | { type: "text_delta"; clientMessageId: string; text: string }
   | { type: "turn_completed"; clientMessageId: string; replyText: string; classification: CompanionClassification; buffered: boolean; informationDate?: string; sources?: Array<{ title: string; url: string }> }
   | { type: "turn_incomplete"; clientMessageId: string; visibleText: string; failureType: string }
-  | { type: "turn_replayed"; clientMessageId: string; replyText: string | null; status: CompanionTurnStatus };
+  | { type: "turn_replayed"; clientMessageId: string; replyText: string | null; status: CompanionTurnStatus }
+  | (CompanionContinuityEvent & { clientMessageId: string });
 
 export type CompanionTurnResult = CompanionTurnRecord & {
   replyText: string | null;
@@ -76,10 +80,18 @@ type Generate = (
 
 type Review = (request: CompanionModelRequest, candidate: string) => Promise<{ approved: boolean; replacement?: string }>;
 type Search = (query: string, signal?: AbortSignal) => Promise<CompanionSearchResult | null>;
+type CompanionLifecycleInput = {
+  auth: CompanionAuth;
+  assignment: CompanionAssignment;
+  sessionId: string;
+  clientMessageId: string;
+  text: string;
+};
 
 export function classifyCompanionInput(text: string): CompanionClassification {
   const input = text.toLocaleLowerCase();
   if (/(自杀|想死|不想活|结束生命|杀了我|伤害自己|伤害他人|有人要杀)/u.test(input)) return "urgent_danger";
+  if (containsSensitiveCompanionInformation(input)) return "sensitive";
   if (/(银行卡|银行账户|密码|验证码|身份证|住址|地址|转账|财务|家庭冲突|丧亲|创伤)/u.test(input)) return "sensitive";
   if (/(医疗|医生|药物|症状|诊断|法律|律师|合同|投资|股票|贷款|保险)/u.test(input)) return "professional";
   if (/(今天|现在|最近|最新|当前|天气|新闻|股价|几点|日期|营业时间)/u.test(input)) return "current_fact";
@@ -115,11 +127,13 @@ export class CompanionRuntime {
 
   constructor(private readonly options: {
     persistence: CompanionPersistence;
-    context: (auth: CompanionAuth, assignment: CompanionAssignment) => CompanionContextMessage[] | Promise<CompanionContextMessage[]>;
+    context: (auth: CompanionAuth, assignment: CompanionAssignment, currentText: string) => CompanionContextMessage[] | Promise<CompanionContextMessage[]>;
     generate: Generate;
     review?: Review;
     search?: Search;
     now?: () => string;
+    beforeContext?: (input: CompanionLifecycleInput, emit: (event: CompanionTurnEvent) => void | Promise<void>) => void | Promise<void>;
+    afterCompleted?: (input: CompanionLifecycleInput, result: CompanionTurnResult, emit: (event: CompanionTurnEvent) => void | Promise<void>) => void | Promise<void>;
   }) {}
 
   async runCompanionTurn(
@@ -160,6 +174,8 @@ export class CompanionRuntime {
     if (assignment.sessionId !== input.sessionId) throw new Error("Companion session does not belong to this membership");
     const config = this.options.persistence.getConfig(context.tenantId, assignment.configVersionId);
     if (!config || config.status !== "published" || config.tenantId !== context.tenantId) throw new Error("Published companion config not found");
+    const lifecycleInput = { ...input, assignment };
+    await this.options.beforeContext?.(lifecycleInput, emit);
     const classification = classifyCompanionInput(input.text);
     const buffered = classification !== "ordinary";
     const turn = this.options.persistence.beginTurn(context, {
@@ -170,7 +186,7 @@ export class CompanionRuntime {
     const now = this.options.now?.() ?? new Date().toISOString();
     const request: CompanionModelRequest = {
       systemPrompt: buildCompanionSystemPrompt(config, now),
-      context: contextForModel(await this.options.context(input.auth, assignment)),
+      context: contextForModel(await this.options.context(input.auth, assignment, input.text)),
       input: input.text,
       config,
     };
@@ -206,7 +222,9 @@ export class CompanionRuntime {
         type: "turn_completed", clientMessageId: input.clientMessageId, replyText, classification, buffered,
         ...(search ? { informationDate: search.informationDate, sources: search.sources } : {}),
       });
-      return toResult(completed);
+      const result = toResult(completed);
+      try { await this.options.afterCompleted?.(lifecycleInput, result, emit); } catch { /* Durable continuity work must not downgrade a completed reply. */ }
+      return result;
     } catch (error) {
       const failureType = error instanceof DOMException && error.name === "AbortError" ? "interrupted" : error instanceof Error ? error.message : String(error);
       const rejected = failureType === "review_rejected";

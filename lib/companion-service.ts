@@ -1,49 +1,23 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { buildSessionContext, getSessionEntries, resolveSessionPath } from "./session-reader";
+import { resolveSessionPath } from "./session-reader";
 import { getRpcSession, startRpcSession, type AgentEvent, type AgentSessionWrapper } from "./rpc-manager";
 import {
   buildCompanionSystemPrompt,
   CompanionRuntime,
   type CompanionAuth,
-  type CompanionContextMessage,
   type CompanionModelRequest,
   type CompanionSearchResult,
   type CompanionTurnEvent,
 } from "./companion-runtime";
 import { getTenantStore } from "./tenant-store";
+import { buildTenantCompanionContext, completeCompanionContinuity, prepareCompanionContinuity } from "./companion-runtime-continuity";
 
 function companionCwd(auth: CompanionAuth): string {
   const path = join(getAgentDir(), "companion-sessions", auth.tenant.id, auth.membership.id);
   mkdirSync(path, { recursive: true, mode: 0o700 });
   return path;
-}
-
-function textFromMessage(message: { role: string; content?: unknown }): string {
-  if (typeof message.content === "string") return message.content;
-  if (!Array.isArray(message.content)) return "";
-  return message.content.flatMap((block) => {
-    if (typeof block === "string") return [block];
-    if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") return [block.text];
-    return [];
-  }).join("");
-}
-
-async function companionContext(auth: CompanionAuth, sessionId: string): Promise<CompanionContextMessage[]> {
-  const path = await resolveSessionPath(sessionId);
-  if (!path) return [];
-  const store = getTenantStore();
-  const turnMetadata = store.listCompanionTurns({ tenantId: auth.tenant.id, membershipId: auth.membership.id });
-  const excluded = turnMetadata.filter((turn) => turn.status === "incomplete" || turn.status === "rejected");
-  const context = buildSessionContext(getSessionEntries(path), null, { tail: 80 });
-  return context.messages.flatMap((message) => {
-    if (message.role !== "user" && message.role !== "assistant") return [];
-    const text = textFromMessage(message);
-    if (!text) return [];
-    const failed = excluded.some((turn) => turn.replyText && (text === turn.replyText || text.includes(turn.replyText)));
-    return [{ role: message.role, text, status: failed ? "incomplete" as const : "complete" as const }];
-  });
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -180,7 +154,8 @@ async function runTenantCompanionTurnOnce(input: {
 }, emit: (event: CompanionTurnEvent) => void | Promise<void>): Promise<Awaited<ReturnType<CompanionRuntime["runCompanionTurn"]>>> {
   const session = await getCompanionSession(input.auth);
   const store = getTenantStore();
-  const assignment = store.getCompanionAssignment({ tenantId: input.auth.tenant.id, membershipId: input.auth.membership.id });
+  const context = { tenantId: input.auth.tenant.id, membershipId: input.auth.membership.id };
+  const assignment = store.getCompanionAssignment(context);
   if (!assignment) throw new Error("Companion assignment not found");
   const key = `${input.auth.tenant.id}:${input.auth.membership.id}`;
   const controller = new AbortController();
@@ -195,7 +170,9 @@ async function runTenantCompanionTurnOnce(input: {
       beginTurn: (context, turn) => store.beginCompanionTurn(context, turn),
       completeTurn: (context, turnId, update) => store.completeCompanionTurn(context, turnId, update),
     },
-    context: () => companionContext(input.auth, assignment.sessionId),
+    context: (auth, currentAssignment, currentText) => buildTenantCompanionContext(store, auth, currentAssignment.sessionId, currentText),
+    beforeContext: (turn, eventSink) => prepareCompanionContinuity(store, context, turn, eventSink),
+    afterCompleted: (turn, _result, eventSink) => completeCompanionContinuity(store, context, turn, eventSink),
     generate: createPiGenerator(session),
     review: async (request, candidate) => reviewCandidate(request, candidate),
     async search(query): Promise<CompanionSearchResult | null> {
