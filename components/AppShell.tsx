@@ -16,6 +16,7 @@ import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
 import { TerminalPanel } from "./TerminalPanel";
+import { CompanionShell } from "./CompanionShell";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -76,6 +77,17 @@ function parkedNewSessionDraftKey(cwd: string): string {
 }
 
 export function AppShell() {
+  const [hostAccess, setHostAccess] = useState<boolean | null>(null);
+  const [tenantRole, setTenantRole] = useState<string | null>(null);
+  useEffect(() => {
+    void fetch("/api/web-auth", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((body) => {
+        setHostAccess(body.account?.hostAccess === true);
+        setTenantRole(typeof body.account?.membership?.role === "string" ? body.account.membership.role : null);
+      })
+      .catch(() => setHostAccess(false));
+  }, []);
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
@@ -1730,6 +1742,8 @@ export function AppShell() {
       </button>
     );
   };
+
+  if (tenantRole === "member" && hostAccess === false) return <CompanionShell />;
 
   return (
     <>

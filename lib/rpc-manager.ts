@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
@@ -234,6 +235,7 @@ export class AgentSessionWrapper {
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
+  private exactContextMessages: PiAgentMessage[] | undefined;
   private readonly exactSystemPrompt?: () => string;
   private readonly chatOnly: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
@@ -431,9 +433,15 @@ export class AgentSessionWrapper {
         context: {
           ...(prepared?.context ?? turn.context),
           systemPrompt: this.exactSystemPrompt!(),
+          ...(this.exactContextMessages ? { messages: this.exactContextMessages } : {}),
         },
       };
     };
+  }
+
+  /** Replace the model-visible transcript for the next companion turn only. */
+  setExactContextMessages(messages: PiAgentMessage[]): void {
+    this.exactContextMessages = messages;
   }
 
   setActiveToolSelection(toolNames: string[]): void {
