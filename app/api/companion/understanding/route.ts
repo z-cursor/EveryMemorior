@@ -23,6 +23,7 @@ function companionUnderstandingState(request: Request) {
   return {
     explanation: "凡小忆是 AI。长期记忆与正常聊天分开选择；不开启也能继续聊天。开启后，普通稳定偏好会显示可撤销回执，敏感信息仍需逐条确认。",
     consent: store.getCompanionConsent(context),
+    reviewConsent: store.getCompanionReviewConsent(context),
     memories: store.listCompanionMemories(context),
     profile: store.listCompanionProfileFields(context),
     fragments: store.listCompanionFragments(context, 20),
@@ -52,6 +53,9 @@ export async function PATCH(request: Request) {
       case "set_consent":
         if (typeof body.enabled !== "boolean") throw new Error("enabled must be a boolean");
         return NextResponse.json({ consent: store.setCompanionMemoryConsent(context, body.enabled) });
+      case "set_review_consent":
+        if (typeof body.enabled !== "boolean") throw new Error("enabled must be a boolean");
+        return NextResponse.json({ reviewConsent: store.setCompanionReviewConsent(context, body.enabled, "internal-trial-v1") });
       case "confirm_memory":
         if (typeof body.memoryId !== "string") throw new Error("memoryId is required");
         return NextResponse.json({ memory: store.confirmCompanionMemory(context, body.memoryId) });

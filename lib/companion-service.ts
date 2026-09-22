@@ -13,6 +13,7 @@ import {
 } from "./companion-runtime";
 import { getTenantStore } from "./tenant-store";
 import { buildTenantCompanionContext, completeCompanionContinuity, prepareCompanionContinuity } from "./companion-runtime-continuity";
+import { shouldSampleCompanionTurn } from "./companion-quality";
 
 function companionCwd(auth: CompanionAuth): string {
   const path = join(getAgentDir(), "companion-sessions", auth.tenant.id, auth.membership.id);
@@ -172,7 +173,10 @@ async function runTenantCompanionTurnOnce(input: {
     },
     context: (auth, currentAssignment, currentText) => buildTenantCompanionContext(store, auth, currentAssignment.sessionId, currentText),
     beforeContext: (turn, eventSink) => prepareCompanionContinuity(store, context, turn, eventSink),
-    afterCompleted: (turn, _result, eventSink) => completeCompanionContinuity(store, context, turn, eventSink),
+    afterCompleted: async (turn, result, eventSink) => {
+      await completeCompanionContinuity(store, context, turn, eventSink);
+      if (result.replyText && shouldSampleCompanionTurn(result.id)) store.sampleCompletedCompanionTurn(context, { turnId: result.id, userText: input.text, assistantText: result.replyText });
+    },
     generate: createPiGenerator(session),
     review: async (request, candidate) => reviewCandidate(request, candidate),
     async search(query): Promise<CompanionSearchResult | null> {

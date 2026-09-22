@@ -53,6 +53,7 @@ export const zhTWLocale: LocalePlugin = {
     "auth.logOut": "登出",
     "auth.loggingOut": "正在登出...",
     "auth.logoutFailed": "登出失敗，請再試一次。",
+    "settings.quality": "陪伴品質治理",
     "skills.scope.global": "全域",
     "skills.scope.project": "專案",
     "skills.scope.path": "路徑",

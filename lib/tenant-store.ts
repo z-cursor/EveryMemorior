@@ -4,8 +4,9 @@ import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { containsProhibitedCompanionProfileContent, containsSensitiveCompanionInformation, normalizedOrdinaryCompanionMemory, ordinaryCompanionTopics } from "./companion-memory-policy";
+import { calculateCompanionTrialMetrics, passesCompanionTrialGate } from "./companion-quality";
 
-export const TENANT_SCHEMA_VERSION = 6;
+export const TENANT_SCHEMA_VERSION = 8;
 
 export type TenantStatus = "active" | "suspended";
 export type UserStatus = "active" | "disabled";
@@ -266,6 +267,100 @@ export interface CompanionBackgroundJob {
 
 export interface CompanionRetentionTarget extends TenantContext {
   sessionId: string;
+}
+
+export interface CompanionReviewConsent extends TenantContext {
+  enabled: boolean;
+  noticeVersion: string | null;
+  consentedAt: string | null;
+  withdrawnAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface CompanionQualitySample {
+  id: string;
+  tenantId: string;
+  membershipId: string;
+  configVersionId: string;
+  messages: Array<{ entryId: string; role: "user" | "assistant"; text: string }>;
+  sampledByMembershipId: string;
+  createdAt: string;
+}
+
+export interface CompanionQualityReview {
+  id: string;
+  tenantId: string;
+  sampleId: string;
+  specificallyResponsive: boolean;
+  interrogation: boolean;
+  ignoredEnding: boolean;
+  baselineViolation: boolean;
+  notes: string;
+  reviewedByMembershipId: string;
+  createdAt: string;
+}
+
+export interface CompanionImprovementProposal {
+  id: string;
+  tenantId: string;
+  sourceType: "review" | "evaluation";
+  sourceId: string;
+  baseConfigVersionId: string;
+  evidence: Array<{ sourceId: string; quote: string }>;
+  proposedBehaviorDocument: string;
+  diff: string;
+  status: "advisory" | "accepted" | "rejected";
+  draftConfigVersionId: string | null;
+  createdAt: string;
+  reviewedAt: string | null;
+}
+
+export interface CompanionEvaluationRun {
+  id: string;
+  tenantId: string;
+  configVersionId: string;
+  suite: "quick" | "full";
+  evaluationMode: "single_turn" | "rolling_episode";
+  status: "pending" | "completed" | "failed";
+  graderVersion: string;
+  bridgeFromGraderVersion: string | null;
+  candidate: Record<string, unknown>;
+  questions: unknown[];
+  privateAnswers: unknown[];
+  graderPrompt: string;
+  graderModel: string;
+  parameters: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  itemCount: number;
+  averageScore: number | null;
+  fatalCount: number;
+  results: unknown[];
+  suggestions: unknown[];
+  createdByMembershipId: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface CompanionCalibration {
+  id: string;
+  tenantId: string;
+  runId: string;
+  itemId: string;
+  band: "high" | "low" | "borderline";
+  humanScore: number;
+  automaticScore: number;
+  notes: string;
+}
+
+export interface TenantAuditEvent {
+  id: string;
+  tenantId: string;
+  actorUserId: string | null;
+  actorMembershipId: string | null;
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  createdAt: string;
 }
 
 type SqlRow = Record<string, SQLInputValue>;
@@ -653,10 +748,194 @@ CREATE TABLE IF NOT EXISTS companion_memory_feedback (
 ) STRICT;
 `;
 
+const MIGRATION_7 = `
+CREATE TABLE IF NOT EXISTS companion_review_consents (
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  notice_version TEXT,
+  consented_at TEXT,
+  withdrawn_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (tenant_id, membership_id),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS companion_quality_samples (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  config_version_id TEXT NOT NULL,
+  messages_json TEXT NOT NULL CHECK (json_valid(messages_json)),
+  sampled_by_membership_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (tenant_id, id),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, config_version_id) REFERENCES companion_config_versions(tenant_id, id),
+  FOREIGN KEY (tenant_id, sampled_by_membership_id) REFERENCES tenant_memberships(tenant_id, id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_quality_samples_tenant_idx
+  ON companion_quality_samples(tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS companion_quality_reviews (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  sample_id TEXT NOT NULL,
+  specifically_responsive INTEGER NOT NULL CHECK (specifically_responsive IN (0, 1)),
+  interrogation INTEGER NOT NULL CHECK (interrogation IN (0, 1)),
+  ignored_ending INTEGER NOT NULL CHECK (ignored_ending IN (0, 1)),
+  baseline_violation INTEGER NOT NULL CHECK (baseline_violation IN (0, 1)),
+  notes TEXT NOT NULL,
+  reviewed_by_membership_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (tenant_id, sample_id),
+  UNIQUE (tenant_id, id),
+  FOREIGN KEY (tenant_id, sample_id) REFERENCES companion_quality_samples(tenant_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, reviewed_by_membership_id) REFERENCES tenant_memberships(tenant_id, id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS companion_evaluation_runs (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  config_version_id TEXT NOT NULL,
+  suite TEXT NOT NULL CHECK (suite IN ('quick', 'full')),
+  evaluation_mode TEXT NOT NULL CHECK (evaluation_mode IN ('single_turn', 'rolling_episode')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+  grader_version TEXT NOT NULL,
+  bridge_from_grader_version TEXT,
+  candidate_snapshot_json TEXT NOT NULL CHECK (json_valid(candidate_snapshot_json)),
+  questions_snapshot_json TEXT NOT NULL CHECK (json_valid(questions_snapshot_json)),
+  private_answers_snapshot_json TEXT NOT NULL CHECK (json_valid(private_answers_snapshot_json)),
+  grader_prompt TEXT NOT NULL,
+  grader_model TEXT NOT NULL,
+  parameters_json TEXT NOT NULL CHECK (json_valid(parameters_json)),
+  policy_json TEXT NOT NULL CHECK (json_valid(policy_json)),
+  item_count INTEGER NOT NULL CHECK (item_count > 0),
+  average_score REAL,
+  fatal_count INTEGER NOT NULL DEFAULT 0 CHECK (fatal_count >= 0),
+  suggestions_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(suggestions_json)),
+  created_by_membership_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  completed_at TEXT,
+  UNIQUE (tenant_id, id),
+  FOREIGN KEY (tenant_id, config_version_id) REFERENCES companion_config_versions(tenant_id, id),
+  FOREIGN KEY (tenant_id, created_by_membership_id) REFERENCES tenant_memberships(tenant_id, id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_evaluation_runs_config_idx
+  ON companion_evaluation_runs(tenant_id, config_version_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS companion_calibrations (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  band TEXT NOT NULL CHECK (band IN ('high', 'low', 'borderline')),
+  human_score REAL NOT NULL CHECK (human_score >= 0 AND human_score <= 100),
+  automatic_score REAL NOT NULL CHECK (automatic_score >= 0 AND automatic_score <= 100),
+  notes TEXT NOT NULL,
+  created_by_membership_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (tenant_id, run_id) REFERENCES companion_evaluation_runs(tenant_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, created_by_membership_id) REFERENCES tenant_memberships(tenant_id, id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_calibrations_tenant_idx ON companion_calibrations(tenant_id, run_id);
+
+CREATE TABLE IF NOT EXISTS companion_improvement_proposals (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  source_type TEXT NOT NULL CHECK (source_type IN ('review', 'evaluation')),
+  source_id TEXT NOT NULL,
+  base_config_version_id TEXT NOT NULL,
+  evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json)),
+  proposed_behavior_document TEXT NOT NULL,
+  diff_text TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('advisory', 'accepted', 'rejected')),
+  draft_config_version_id TEXT,
+  created_by_membership_id TEXT NOT NULL,
+  reviewed_by_membership_id TEXT,
+  created_at TEXT NOT NULL,
+  reviewed_at TEXT,
+  UNIQUE (tenant_id, id),
+  FOREIGN KEY (tenant_id, base_config_version_id) REFERENCES companion_config_versions(tenant_id, id),
+  FOREIGN KEY (tenant_id, draft_config_version_id) REFERENCES companion_config_versions(tenant_id, id),
+  FOREIGN KEY (tenant_id, created_by_membership_id) REFERENCES tenant_memberships(tenant_id, id),
+  FOREIGN KEY (tenant_id, reviewed_by_membership_id) REFERENCES tenant_memberships(tenant_id, id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS companion_assignment_migrations (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  from_config_version_id TEXT NOT NULL,
+  to_config_version_id TEXT NOT NULL,
+  rollback_config_version_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  migrated_by_membership_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (tenant_id, from_config_version_id) REFERENCES companion_config_versions(tenant_id, id),
+  FOREIGN KEY (tenant_id, to_config_version_id) REFERENCES companion_config_versions(tenant_id, id),
+  FOREIGN KEY (tenant_id, rollback_config_version_id) REFERENCES companion_config_versions(tenant_id, id),
+  FOREIGN KEY (tenant_id, migrated_by_membership_id) REFERENCES tenant_memberships(tenant_id, id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS companion_assignment_migrations_tenant_idx ON companion_assignment_migrations(tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS companion_trial_participants (
+  tenant_id TEXT NOT NULL,
+  membership_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  stage TEXT NOT NULL CHECK (stage IN ('scripted', 'free_chat', 'completed')),
+  excludes_direct_identifiers INTEGER NOT NULL CHECK (excludes_direct_identifiers IN (0, 1)),
+  fictional_sensitive_exercises INTEGER NOT NULL CHECK (fictional_sensitive_exercises IN (0, 1)),
+  willing_to_continue INTEGER CHECK (willing_to_continue IS NULL OR willing_to_continue IN (0, 1)),
+  exit_interviewed_at TEXT,
+  PRIMARY KEY (tenant_id, membership_id),
+  FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id) ON DELETE CASCADE
+) STRICT;
+`;
+
+const MIGRATION_8 = `
+CREATE UNIQUE INDEX IF NOT EXISTS companion_calibrations_item_idx
+  ON companion_calibrations(tenant_id, run_id, item_id) WHERE item_id <> '';
+`;
+
 function requiredText(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${field} is required`);
   return normalized;
+}
+
+function visibleLineDiff(before: string, after: string): string {
+  const beforeLines = before.split(/\r?\n/u);
+  const afterLines = after.split(/\r?\n/u);
+  let prefix = 0;
+  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) prefix += 1;
+  return [
+    ...beforeLines.slice(prefix).map((line) => `-${line}`),
+    ...afterLines.slice(prefix).map((line) => `+${line}`),
+  ].join("\n");
+}
+
+export function redactDirectIdentifiers(value: string): string {
+  return value
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, "[邮箱已移除]")
+    .replace(/(?<!\d)1[3-9]\d{9}(?!\d)/gu, "[手机号已移除]")
+    .replace(/\b[A-Z]{1,3}\d{6,12}\b/giu, "[证件号已移除]")
+    .replace(/(?<!\d)(?:0\d{2,3}[- ]?)?\d{7,8}(?!\d)/gu, "[座机号已移除]")
+    .replace(/(?<!\d)\d{17}[\dXx](?!\d)/gu, "[证件号已移除]")
+    .replace(/(?<!\d)(?:\d[ -]?){12,19}(?!\d)/gu, "[账号已移除]")
+    .replace(/((?:我叫|我的姓名是|姓名[：:]?|我姓|叫我))\s*[\p{Script=Han}·]{1,8}/gu, "$1[姓名已移除]")
+    .replace(/((?:住在|住址[是：:]?|家庭地址[是：:]?|地址[是：:]?))[^，。；！？\n]{2,80}/gu, "$1[地址已移除]")
+    .replace(/((?:工号|学号|客户号|会员号|员工编号)[是：:]?)\s*[A-Z0-9-]{2,}/giu, "$1[标识已移除]")
+    .replace(/((?:单位|公司|学校)[是：:]?)\s*[^，。；！？\n]{2,50}/gu, "$1[机构已移除]");
+}
+
+export function stillContainsDirectIdentifier(value: string): boolean {
+  const remainder = value.replace(/(?:护照|身份证|住址|家庭地址|手机号|电话号码|座机|电子邮箱|邮编|车牌)?\s*\[[^\]]+已移除\]/gu, "");
+  return /(?:护照|身份证|住址|家庭地址|手机号|电话号码|座机|电子邮箱|邮编|车牌)[^，。；！？\n]{2,40}/u.test(remainder)
+    || /(?<!\d)\d{5,}(?!\d)/u.test(remainder)
+    || /(?:我是|我叫|叫我|我姓)\s*[\p{Script=Han}·]{1,8}/u.test(remainder)
+    || /[\p{Script=Han}]{2,}(?:省|市|区|县|镇|乡|村|路|街|巷|小区|大厦|单元|室|大学|学校|公司|医院|银行|政府|委员会|协会|养老院)/u.test(remainder)
+    || /(?:^|[，。！？、\s])(?:赵|钱|孙|李|周|吴|郑|王|冯|陈|褚|卫|蒋|沈|韩|杨|朱|秦|尤|许|何|吕|施|张|孔|曹|严|华|金|魏|陶|姜|戚|谢|邹|喻|柏|水|窦|章|云|苏|潘|葛|奚|范|彭|郎|鲁|韦|昌|马|苗|凤|花|方|俞|任|袁|柳|唐|罗|薛|雷|贺|倪|汤|滕|殷|毕|郝|邬|安|常|乐|于|时|傅|皮|卞|齐|康|伍|余|元|卜|顾|孟|平|黄|和|穆|萧|尹)[\p{Script=Han}]{1,2}(?=[，。！？、\s]|$)/u.test(remainder);
 }
 
 function normalizedEmail(value: string): string {
@@ -1482,6 +1761,10 @@ export class TenantStore {
     const actor = this.requireTenantAdmin(context);
     const config = this.getCompanionConfigVersion(context.tenantId, configVersionId);
     if (!config || config.status !== "draft") throw new Error("Companion config draft not found");
+    const evaluation = this.database.prepare(`SELECT 1 FROM companion_evaluation_runs
+      WHERE tenant_id = ? AND config_version_id = ? AND status = 'completed' AND fatal_count = 0 AND average_score >= 85
+      ORDER BY completed_at DESC LIMIT 1`).get(context.tenantId, configVersionId);
+    if (!evaluation) throw new Error("A completed evaluation with no fatal issues is required before publication");
     const now = new Date().toISOString();
     this.database.prepare("UPDATE companion_config_versions SET status = 'published', published_at = ? WHERE tenant_id = ? AND id = ?")
       .run(now, context.tenantId, configVersionId);
@@ -1520,18 +1803,81 @@ export class TenantStore {
     return this.getCompanionAssignment(context)!;
   }
 
-  migrateCompanionAssignment(context: TenantContext, membershipId: string, configVersionId: string): CompanionAssignment {
+  previewCompanionMigration(context: TenantContext, membershipId: string, configVersionId: string): {
+    current: CompanionAssignment;
+    target: CompanionConfigVersion;
+    affectedMembershipIds: string[];
+    diff: string;
+  } {
+    this.requireTenantAdmin(context);
+    const target = this.getCompanionConfigVersion(context.tenantId, configVersionId);
+    if (!target || target.status !== "published") throw new Error("Published companion config not found");
+    const current = this.database.prepare("SELECT * FROM companion_assignments WHERE tenant_id = ? AND membership_id = ?")
+      .get(context.tenantId, membershipId) as SqlRow | undefined;
+    if (!current) throw new Error("Companion assignment not found");
+    const assignment = mapCompanionAssignment(current);
+    const source = this.getCompanionConfigVersion(context.tenantId, assignment.configVersionId)!;
+    return {
+      current: assignment, target,
+      affectedMembershipIds: [membershipId],
+      diff: visibleLineDiff(source.behaviorDocument, target.behaviorDocument),
+    };
+  }
+
+  migrateCompanionAssignment(
+    context: TenantContext,
+    membershipId: string,
+    configVersionId: string,
+    options?: { sessionBusy?: boolean; reason?: string },
+  ): CompanionAssignment {
+    return this.migrateCompanionAssignmentWithOptions(context, membershipId, configVersionId, options);
+  }
+
+  private migrateCompanionAssignmentWithOptions(context: TenantContext, membershipId: string, configVersionId: string, options?: { sessionBusy?: boolean; reason?: string }): CompanionAssignment {
     const actor = this.requireTenantAdmin(context);
+    if (options?.sessionBusy) throw new Error("Cannot migrate while the companion is generating a reply");
     const target = this.getCompanionConfigVersion(context.tenantId, configVersionId);
     if (!target || target.status !== "published") throw new Error("Published companion config not found");
     const assignment = this.database.prepare("SELECT * FROM companion_assignments WHERE tenant_id = ? AND membership_id = ?")
       .get(context.tenantId, membershipId) as SqlRow | undefined;
     if (!assignment) throw new Error("Companion assignment not found");
+    if (this.database.prepare(`SELECT 1 FROM companion_turns WHERE tenant_id = ? AND membership_id = ? AND status = 'running' LIMIT 1`).get(context.tenantId, membershipId)) {
+      throw new Error("Cannot migrate while the companion is generating a reply");
+    }
+    const previousConfigVersionId = asString(assignment, "config_version_id");
+    if (previousConfigVersionId === configVersionId) return mapCompanionAssignment(assignment);
     const now = new Date().toISOString();
     this.database.prepare("UPDATE companion_assignments SET config_version_id = ?, updated_at = ? WHERE tenant_id = ? AND membership_id = ?")
       .run(configVersionId, now, context.tenantId, membershipId);
+    this.database.prepare(`INSERT INTO companion_assignment_migrations
+      (id, tenant_id, membership_id, from_config_version_id, to_config_version_id,
+       rollback_config_version_id, reason, migrated_by_membership_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(randomUUID(), context.tenantId, membershipId, previousConfigVersionId, configVersionId,
+        previousConfigVersionId, options?.reason?.trim() || "explicit migration", actor.id, now);
     this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.assignment.migrated", "companion_assignment", membershipId, now);
     return this.getCompanionAssignment({ tenantId: context.tenantId, membershipId })!;
+  }
+
+  migrateCompanionAssignments(context: TenantContext, membershipIds: string[], configVersionId: string, reason: string): CompanionAssignment[] {
+    this.requireTenantAdmin(context);
+    const uniqueIds = [...new Set(membershipIds.map((id) => requiredText(id, "membershipId")))];
+    if (uniqueIds.length < 1) throw new Error("At least one participant is required for batch migration");
+    return this.transaction(() => uniqueIds.map((membershipId) => this.migrateCompanionAssignmentWithOptions(context, membershipId, configVersionId, { reason })));
+  }
+
+  listCompanionMigrationHistory(context: TenantContext): Array<{
+    id: string; membershipId: string; fromConfigVersionId: string; toConfigVersionId: string;
+    rollbackConfigVersionId: string; reason: string; migratedByMembershipId: string; createdAt: string;
+  }> {
+    this.requireTenantAdmin(context);
+    const rows = this.database.prepare(`SELECT * FROM companion_assignment_migrations
+      WHERE tenant_id = ? ORDER BY created_at DESC`).all(context.tenantId) as SqlRow[];
+    return rows.map((row) => ({
+      id: asString(row, "id"), membershipId: asString(row, "membership_id"), fromConfigVersionId: asString(row, "from_config_version_id"),
+      toConfigVersionId: asString(row, "to_config_version_id"), rollbackConfigVersionId: asString(row, "rollback_config_version_id"),
+      reason: asString(row, "reason"), migratedByMembershipId: asString(row, "migrated_by_membership_id"), createdAt: asString(row, "created_at"),
+    }));
   }
 
   findCompanionTurn(context: TenantContext, clientMessageId: string): CompanionTurnRecord | null {
@@ -1580,6 +1926,458 @@ export class TenantStore {
       .get(context.tenantId, context.membershipId, turnId) as SqlRow | undefined;
     if (!row) throw new Error("Companion turn not found");
     return mapCompanionTurn(row);
+  }
+
+  getCompanionReviewConsent(context: TenantContext): CompanionReviewConsent {
+    this.requireActiveMembership(context);
+    const row = this.database.prepare(`SELECT * FROM companion_review_consents
+      WHERE tenant_id = ? AND membership_id = ?`).get(context.tenantId, context.membershipId) as SqlRow | undefined;
+    return row ? {
+      tenantId: asString(row, "tenant_id"), membershipId: asString(row, "membership_id"),
+      enabled: Boolean(row.enabled), noticeVersion: row.notice_version as string | null,
+      consentedAt: row.consented_at as string | null, withdrawnAt: row.withdrawn_at as string | null,
+      updatedAt: asString(row, "updated_at"),
+    } : {
+      ...context, enabled: false, noticeVersion: null, consentedAt: null, withdrawnAt: null, updatedAt: null,
+    };
+  }
+
+  setCompanionReviewConsent(context: TenantContext, enabled: boolean, noticeVersion: string): CompanionReviewConsent {
+    const actor = this.requireActiveMembership(context);
+    const notice = requiredText(noticeVersion, "noticeVersion");
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_review_consents
+      (tenant_id, membership_id, enabled, notice_version, consented_at, withdrawn_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (tenant_id, membership_id) DO UPDATE SET
+        enabled = excluded.enabled,
+        notice_version = excluded.notice_version,
+        consented_at = CASE WHEN excluded.enabled = 1 THEN excluded.consented_at ELSE companion_review_consents.consented_at END,
+        withdrawn_at = excluded.withdrawn_at,
+        updated_at = excluded.updated_at`)
+      .run(context.tenantId, context.membershipId, enabled ? 1 : 0, notice, enabled ? now : null, enabled ? null : now, now);
+    this.insertAuditEvent(
+      context.tenantId, actor.userId, actor.id,
+      enabled ? "companion.review.opted_in" : "companion.review.revoked",
+      "companion_review_consent", context.membershipId, now,
+    );
+    return this.getCompanionReviewConsent(context);
+  }
+
+  createCompanionQualitySample(context: TenantContext, input: {
+    membershipId: string;
+    configVersionId: string;
+    messages: Array<{ entryId: string; role: "user" | "assistant"; text: string }>;
+  }): CompanionQualitySample {
+    const actor = this.requireTenantAdmin(context);
+    const participant = { tenantId: context.tenantId, membershipId: requiredText(input.membershipId, "membershipId") };
+    this.requireActiveMembership(participant);
+    if (!this.getCompanionReviewConsent(participant).enabled) throw new Error("Quality review consent is required before sampling");
+    if (!this.getCompanionConfigVersion(context.tenantId, input.configVersionId)) throw new Error("Companion config version not found");
+    if (input.messages.length < 1 || input.messages.length > 6) throw new Error("Quality samples must contain one to six messages");
+    const messages = input.messages.map((message) => {
+      if (message.role !== "user" && message.role !== "assistant") throw new Error("Quality sample message role is invalid");
+      const text = requiredText(message.text, "message.text");
+      if (text.length > 2_000) throw new Error("Quality sample messages must be 2000 characters or fewer");
+      return { entryId: requiredText(message.entryId, "message.entryId"), role: message.role, text };
+    });
+    if (messages.reduce((total, message) => total + message.text.length, 0) > 6_000) {
+      throw new Error("Quality sample fragment is too large");
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_quality_samples
+      (id, tenant_id, membership_id, config_version_id, messages_json, sampled_by_membership_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, context.tenantId, participant.membershipId, input.configVersionId, JSON.stringify(messages), actor.id, now);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.review.sampled", "companion_quality_sample", id, now);
+    return this.listCompanionQualitySamples(context).find((sample) => sample.id === id)!;
+  }
+
+  sampleCompletedCompanionTurn(context: TenantContext, input: { turnId: string; userText: string; assistantText: string }): CompanionQualitySample | null {
+    const actor = this.requireActiveMembership(context);
+    if (!this.getCompanionReviewConsent(context).enabled) return null;
+    const turn = this.database.prepare(`SELECT id, config_version_id FROM companion_turns
+      WHERE tenant_id = ? AND membership_id = ? AND id = ? AND status = 'completed'`)
+      .get(context.tenantId, context.membershipId, input.turnId) as SqlRow | undefined;
+    if (!turn) throw new Error("Completed companion turn not found");
+    const pending = this.database.prepare(`SELECT COUNT(*) AS count FROM companion_quality_samples s
+      LEFT JOIN companion_quality_reviews r ON r.tenant_id = s.tenant_id AND r.sample_id = s.id
+      WHERE s.tenant_id = ? AND s.membership_id = ? AND r.id IS NULL`).get(context.tenantId, context.membershipId) as SqlRow;
+    if (Number(pending.count) >= 5) return null;
+    const userText = redactDirectIdentifiers(requiredText(input.userText, "userText"));
+    const assistantText = redactDirectIdentifiers(requiredText(input.assistantText, "assistantText"));
+    if (stillContainsDirectIdentifier(userText) || stillContainsDirectIdentifier(assistantText)) return null;
+    const messages = [
+      { entryId: `${input.turnId}:user`, role: "user" as const, text: userText.slice(0, 2_000) },
+      { entryId: `${input.turnId}:assistant`, role: "assistant" as const, text: assistantText.slice(0, 2_000) },
+    ];
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_quality_samples
+      (id, tenant_id, membership_id, config_version_id, messages_json, sampled_by_membership_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, context.tenantId, context.membershipId, asString(turn, "config_version_id"), JSON.stringify(messages), actor.id, now);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.review.sampled", "companion_quality_sample", id, now);
+    return { id, tenantId: context.tenantId, membershipId: context.membershipId, configVersionId: asString(turn, "config_version_id"), messages, sampledByMembershipId: actor.id, createdAt: now };
+  }
+
+  listCompanionQualitySamples(context: TenantContext, pendingOnly = false): CompanionQualitySample[] {
+    const actor = this.requireTenantAdmin(context);
+    const rows = this.database.prepare(`SELECT s.* FROM companion_quality_samples s
+      LEFT JOIN companion_quality_reviews r ON r.tenant_id = s.tenant_id AND r.sample_id = s.id
+      WHERE s.tenant_id = ? AND (? = 0 OR r.id IS NULL) ORDER BY s.created_at DESC`).all(context.tenantId, pendingOnly ? 1 : 0) as SqlRow[];
+    const samples = rows.map((row) => ({
+      id: asString(row, "id"), tenantId: asString(row, "tenant_id"), membershipId: asString(row, "membership_id"),
+      configVersionId: asString(row, "config_version_id"),
+      messages: JSON.parse(asString(row, "messages_json")) as CompanionQualitySample["messages"],
+      sampledByMembershipId: asString(row, "sampled_by_membership_id"), createdAt: asString(row, "created_at"),
+    }));
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.review.samples_accessed", "companion_quality_sample", "list", new Date().toISOString());
+    return samples;
+  }
+
+  recordCompanionQualityReview(context: TenantContext, sampleId: string, input: {
+    specificallyResponsive: boolean;
+    interrogation: boolean;
+    ignoredEnding: boolean;
+    baselineViolation: boolean;
+    notes: string;
+  }): CompanionQualityReview {
+    const actor = this.requireTenantAdmin(context);
+    const sample = this.database.prepare(`SELECT 1 FROM companion_quality_samples WHERE tenant_id = ? AND id = ?`)
+      .get(context.tenantId, sampleId);
+    if (!sample) throw new Error("Quality sample not found");
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_quality_reviews
+      (id, tenant_id, sample_id, specifically_responsive, interrogation, ignored_ending,
+       baseline_violation, notes, reviewed_by_membership_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, context.tenantId, sampleId, input.specificallyResponsive ? 1 : 0, input.interrogation ? 1 : 0,
+        input.ignoredEnding ? 1 : 0, input.baselineViolation ? 1 : 0, requiredText(input.notes, "review.notes"), actor.id, now);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.review.decided", "companion_quality_review", id, now);
+    return {
+      id, tenantId: context.tenantId, sampleId, specificallyResponsive: input.specificallyResponsive,
+      interrogation: input.interrogation, ignoredEnding: input.ignoredEnding,
+      baselineViolation: input.baselineViolation, notes: input.notes.trim(), reviewedByMembershipId: actor.id, createdAt: now,
+    };
+  }
+
+  createCompanionImprovementProposal(context: TenantContext, input: {
+    sourceType: "review" | "evaluation";
+    sourceId: string;
+    baseConfigVersionId: string;
+    evidence: Array<{ sourceId: string; quote: string }>;
+    proposedBehaviorDocument: string;
+  }): CompanionImprovementProposal {
+    const actor = this.requireTenantAdmin(context);
+    const base = this.getCompanionConfigVersion(context.tenantId, input.baseConfigVersionId);
+    if (!base) throw new Error("Base companion config not found");
+    const sourceTable = input.sourceType === "review" ? "companion_quality_reviews" : "companion_evaluation_runs";
+    if (!this.database.prepare(`SELECT 1 FROM ${sourceTable} WHERE tenant_id = ? AND id = ?`).get(context.tenantId, input.sourceId)) {
+      throw new Error("Improvement evidence source not found");
+    }
+    if (input.evidence.length < 1) throw new Error("Cited evidence is required");
+    const evidenceRow = input.sourceType === "review"
+      ? this.database.prepare(`SELECT r.notes, s.messages_json FROM companion_quality_reviews r
+          JOIN companion_quality_samples s ON s.tenant_id = r.tenant_id AND s.id = r.sample_id
+          WHERE r.tenant_id = ? AND r.id = ?`).get(context.tenantId, input.sourceId) as SqlRow
+      : this.database.prepare("SELECT results_json, suggestions_json FROM companion_evaluation_runs WHERE tenant_id = ? AND id = ?")
+          .get(context.tenantId, input.sourceId) as SqlRow;
+    const evidenceCorpus = Object.values(evidenceRow).map(String).join("\n");
+    const evidence = input.evidence.map((item) => ({
+      sourceId: requiredText(item.sourceId, "evidence.sourceId"), quote: requiredText(item.quote, "evidence.quote"),
+    }));
+    if (evidence.some((item) => item.sourceId !== input.sourceId || !evidenceCorpus.includes(item.quote))) throw new Error("Cited evidence must come from the selected review or evaluation");
+    const proposedBehaviorDocument = requiredText(input.proposedBehaviorDocument, "proposedBehaviorDocument");
+    if (proposedBehaviorDocument === base.behaviorDocument) throw new Error("Improvement proposal must change the behavior document");
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const diff = visibleLineDiff(base.behaviorDocument, proposedBehaviorDocument);
+    this.database.prepare(`INSERT INTO companion_improvement_proposals
+      (id, tenant_id, source_type, source_id, base_config_version_id, evidence_json,
+       proposed_behavior_document, diff_text, status, created_by_membership_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'advisory', ?, ?)`)
+      .run(id, context.tenantId, input.sourceType, input.sourceId, base.id, JSON.stringify(evidence),
+        proposedBehaviorDocument, diff, actor.id, now);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.improvement.proposed", "companion_improvement_proposal", id, now);
+    return this.getCompanionImprovementProposal(context, id)!;
+  }
+
+  getCompanionImprovementProposal(context: TenantContext, proposalId: string): CompanionImprovementProposal | null {
+    this.requireTenantAdmin(context);
+    const row = this.database.prepare(`SELECT * FROM companion_improvement_proposals WHERE tenant_id = ? AND id = ?`)
+      .get(context.tenantId, proposalId) as SqlRow | undefined;
+    return row ? {
+      id: asString(row, "id"), tenantId: asString(row, "tenant_id"),
+      sourceType: asString(row, "source_type") as CompanionImprovementProposal["sourceType"],
+      sourceId: asString(row, "source_id"), baseConfigVersionId: asString(row, "base_config_version_id"),
+      evidence: JSON.parse(asString(row, "evidence_json")) as CompanionImprovementProposal["evidence"],
+      proposedBehaviorDocument: asString(row, "proposed_behavior_document"), diff: asString(row, "diff_text"),
+      status: asString(row, "status") as CompanionImprovementProposal["status"],
+      draftConfigVersionId: row.draft_config_version_id as string | null,
+      createdAt: asString(row, "created_at"), reviewedAt: row.reviewed_at as string | null,
+    } : null;
+  }
+
+  listCompanionImprovementProposals(context: TenantContext): CompanionImprovementProposal[] {
+    this.requireTenantAdmin(context);
+    const rows = this.database.prepare("SELECT id FROM companion_improvement_proposals WHERE tenant_id = ? ORDER BY created_at DESC")
+      .all(context.tenantId) as SqlRow[];
+    return rows.map((row) => this.getCompanionImprovementProposal(context, asString(row, "id"))!);
+  }
+
+  acceptCompanionImprovementProposal(context: TenantContext, proposalId: string, behaviorDocument: string): {
+    proposal: CompanionImprovementProposal;
+    draft: CompanionConfigVersion;
+  } {
+    const actor = this.requireTenantAdmin(context);
+    const proposal = this.getCompanionImprovementProposal(context, proposalId);
+    if (!proposal || proposal.status !== "advisory") throw new Error("Advisory improvement proposal not found");
+    const base = this.getCompanionConfigVersion(context.tenantId, proposal.baseConfigVersionId)!;
+    const draft = this.createCompanionConfigDraft(context, {
+      behaviorDocument: requiredText(behaviorDocument, "behaviorDocument"),
+      modelProvider: base.modelProvider, modelId: base.modelId, thinkingLevel: base.thinkingLevel,
+      temperature: base.temperature, maxOutputTokens: base.maxOutputTokens,
+    });
+    const now = new Date().toISOString();
+    this.database.prepare(`UPDATE companion_improvement_proposals
+      SET status = 'accepted', draft_config_version_id = ?, reviewed_by_membership_id = ?, reviewed_at = ?
+      WHERE tenant_id = ? AND id = ?`).run(draft.id, actor.id, now, context.tenantId, proposalId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.improvement.accepted", "companion_improvement_proposal", proposalId, now);
+    return { proposal: this.getCompanionImprovementProposal(context, proposalId)!, draft };
+  }
+
+  createCompanionEvaluationRun(context: TenantContext, input: {
+    configVersionId: string;
+    suite: "quick" | "full";
+    evaluationMode: "single_turn" | "rolling_episode";
+    graderVersion: string;
+    bridgeFromGraderVersion?: string;
+    candidate: Record<string, unknown>;
+    questions: unknown[];
+    privateAnswers: unknown[];
+    graderPrompt: string;
+    graderModel: string;
+    parameters: Record<string, unknown>;
+    policy: Record<string, unknown>;
+    itemCount: number;
+    averageScore?: number | null;
+    fatalCount?: number;
+    results: unknown[];
+    suggestions?: unknown[];
+  }): CompanionEvaluationRun {
+    const actor = this.requireTenantAdmin(context);
+    if (input.suite === "full" && input.itemCount !== 500) throw new Error("Full evaluation must contain 500 cases");
+    if (input.suite === "quick" && ![8, 5].includes(input.itemCount)) throw new Error("Quick evaluation must contain eight cases or one five-turn episode");
+    if (input.questions.length !== input.itemCount || input.privateAnswers.length !== input.itemCount) throw new Error("Evaluation snapshots must contain every question and private answer");
+    if (input.results.length !== input.itemCount) throw new Error("Evaluation results must contain every scored item");
+    if (input.averageScore === null || input.averageScore === undefined || !Number.isFinite(input.averageScore) || input.averageScore < 0 || input.averageScore > 100) throw new Error("A completed evaluation score between 0 and 100 is required");
+    if (!Number.isInteger(input.fatalCount ?? 0) || (input.fatalCount ?? 0) < 0) throw new Error("fatalCount must be a non-negative integer");
+    if (!this.getCompanionConfigVersion(context.tenantId, input.configVersionId)) throw new Error("Companion config version not found");
+    if (input.bridgeFromGraderVersion) {
+      const previous = this.database.prepare(`SELECT candidate_snapshot_json, questions_snapshot_json, private_answers_snapshot_json
+        FROM companion_evaluation_runs WHERE tenant_id = ? AND grader_version = ? AND status = 'completed'
+        ORDER BY completed_at DESC LIMIT 1`).get(context.tenantId, input.bridgeFromGraderVersion) as SqlRow | undefined;
+      if (!previous || input.bridgeFromGraderVersion === input.graderVersion) throw new Error("Bridge evaluation must connect an existing different grader version");
+      if (asString(previous, "candidate_snapshot_json") !== JSON.stringify(input.candidate)
+        || asString(previous, "questions_snapshot_json") !== JSON.stringify(input.questions)
+        || asString(previous, "private_answers_snapshot_json") !== JSON.stringify(input.privateAnswers)) {
+        throw new Error("Bridge evaluation must re-evaluate the same candidate and cases");
+      }
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_evaluation_runs
+      (id, tenant_id, config_version_id, suite, evaluation_mode, status, grader_version,
+       bridge_from_grader_version, candidate_snapshot_json, questions_snapshot_json, private_answers_snapshot_json,
+       grader_prompt, grader_model, parameters_json, policy_json, item_count, average_score, fatal_count,
+       results_json, suggestions_json, created_by_membership_id, created_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, context.tenantId, input.configVersionId, input.suite, input.evaluationMode,
+        requiredText(input.graderVersion, "graderVersion"), input.bridgeFromGraderVersion ?? null,
+        JSON.stringify(input.candidate), JSON.stringify(input.questions), JSON.stringify(input.privateAnswers),
+        requiredText(input.graderPrompt, "graderPrompt"), requiredText(input.graderModel, "graderModel"),
+        JSON.stringify(input.parameters), JSON.stringify(input.policy), input.itemCount, input.averageScore ?? null,
+        input.fatalCount ?? 0, JSON.stringify(input.results), JSON.stringify(input.suggestions ?? []), actor.id, now, now);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.evaluation.completed", "companion_evaluation_run", id, now);
+    return this.getCompanionEvaluationRun(context, id)!;
+  }
+
+  getCompanionEvaluationRun(context: TenantContext, runId: string): CompanionEvaluationRun | null {
+    this.requireTenantAdmin(context);
+    const row = this.database.prepare(`SELECT * FROM companion_evaluation_runs WHERE tenant_id = ? AND id = ?`).get(context.tenantId, runId) as SqlRow | undefined;
+    return row ? {
+      id: asString(row, "id"), tenantId: asString(row, "tenant_id"), configVersionId: asString(row, "config_version_id"),
+      suite: asString(row, "suite") as CompanionEvaluationRun["suite"], evaluationMode: asString(row, "evaluation_mode") as CompanionEvaluationRun["evaluationMode"],
+      status: asString(row, "status") as CompanionEvaluationRun["status"], graderVersion: asString(row, "grader_version"),
+      bridgeFromGraderVersion: row.bridge_from_grader_version as string | null,
+      candidate: JSON.parse(asString(row, "candidate_snapshot_json")) as Record<string, unknown>,
+      questions: JSON.parse(asString(row, "questions_snapshot_json")) as unknown[], privateAnswers: JSON.parse(asString(row, "private_answers_snapshot_json")) as unknown[],
+      graderPrompt: asString(row, "grader_prompt"), graderModel: asString(row, "grader_model"), parameters: JSON.parse(asString(row, "parameters_json")) as Record<string, unknown>,
+      policy: JSON.parse(asString(row, "policy_json")) as Record<string, unknown>, itemCount: Number(row.item_count), averageScore: row.average_score as number | null,
+      fatalCount: Number(row.fatal_count), results: JSON.parse(asString(row, "results_json")) as unknown[], suggestions: JSON.parse(asString(row, "suggestions_json")) as unknown[], createdByMembershipId: asString(row, "created_by_membership_id"),
+      createdAt: asString(row, "created_at"), completedAt: row.completed_at as string | null,
+    } : null;
+  }
+
+  listCompanionEvaluationRuns(context: TenantContext, limit = 20): CompanionEvaluationRun[] {
+    this.requireTenantAdmin(context);
+    const ids = this.database.prepare("SELECT id FROM companion_evaluation_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?")
+      .all(context.tenantId, Math.max(1, Math.min(100, Math.trunc(limit)))) as SqlRow[];
+    return ids.map((row) => this.getCompanionEvaluationRun(context, asString(row, "id"))!);
+  }
+
+  compareCompanionEvaluationRuns(context: TenantContext, leftId: string, rightId: string): { comparable: boolean; bridgeEstablished?: boolean; reason?: string } {
+    const left = this.getCompanionEvaluationRun(context, leftId);
+    const right = this.getCompanionEvaluationRun(context, rightId);
+    if (!left || !right) throw new Error("Evaluation run not found");
+    if (left.id === right.id) return { comparable: true };
+    if (left.graderVersion !== right.graderVersion) {
+      const bridgeEstablished = left.bridgeFromGraderVersion === right.graderVersion || right.bridgeFromGraderVersion === left.graderVersion;
+      return { comparable: false, bridgeEstablished, reason: bridgeEstablished ? "grader versions are related by a bridge run but are not directly comparable" : "grader version changed; bridge re-evaluation is required" };
+    }
+    const calibration = this.getCompanionCalibration(context, right.graderVersion);
+    if (!calibration.ready) return { comparable: false, reason: "at least twelve human calibrations are required" };
+    return { comparable: true };
+  }
+
+  recordCompanionCalibration(context: TenantContext, input: {
+    runId: string; itemId: string; band: "high" | "low" | "borderline"; humanScore: number; notes: string;
+  }): CompanionCalibration {
+    const actor = this.requireTenantAdmin(context);
+    const run = this.getCompanionEvaluationRun(context, input.runId);
+    if (!run) throw new Error("Evaluation run not found");
+    const result = run.results.find((item) => item && typeof item === "object" && (item as Record<string, unknown>).id === input.itemId) as Record<string, unknown> | undefined;
+    const automaticScore = Number(result?.finalTotal);
+    if (!result || !Number.isFinite(automaticScore)) throw new Error("Evaluation item not found");
+    if (!Number.isFinite(input.humanScore) || input.humanScore < 0 || input.humanScore > 100) throw new Error("Human calibration score must be between 0 and 100");
+    const id = randomUUID();
+    this.database.prepare(`INSERT INTO companion_calibrations
+      (id, tenant_id, run_id, item_id, band, human_score, automatic_score, notes, created_by_membership_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, context.tenantId, input.runId, requiredText(input.itemId, "calibration.itemId"), input.band, input.humanScore, automaticScore, requiredText(input.notes, "calibration.notes"), actor.id, new Date().toISOString());
+    return { id, tenantId: context.tenantId, runId: input.runId, itemId: input.itemId.trim(), band: input.band, humanScore: input.humanScore, automaticScore, notes: input.notes.trim() };
+  }
+
+  getCompanionCalibration(context: TenantContext, graderVersion?: string): { reviewedCount: number; bands: Record<"high" | "low" | "borderline", number>; ready: boolean } {
+    this.requireTenantAdmin(context);
+    const rows = (graderVersion
+      ? this.database.prepare(`SELECT c.band, COUNT(*) AS count FROM companion_calibrations c
+          JOIN companion_evaluation_runs r ON r.tenant_id = c.tenant_id AND r.id = c.run_id
+          WHERE c.tenant_id = ? AND r.grader_version = ? GROUP BY c.band`).all(context.tenantId, graderVersion)
+      : this.database.prepare(`SELECT band, COUNT(*) AS count FROM companion_calibrations WHERE tenant_id = ? GROUP BY band`).all(context.tenantId)) as SqlRow[];
+    const bands = { high: 0, low: 0, borderline: 0 };
+    for (const row of rows) bands[asString(row, "band") as keyof typeof bands] = Number(row.count);
+    const reviewedCount = bands.high + bands.low + bands.borderline;
+    return { reviewedCount, bands, ready: reviewedCount >= 12 && bands.high > 0 && bands.low > 0 && bands.borderline > 0 };
+  }
+
+  listCompanionCalibrations(context: TenantContext, graderVersion?: string): CompanionCalibration[] {
+    this.requireTenantAdmin(context);
+    const rows = (graderVersion
+      ? this.database.prepare(`SELECT c.* FROM companion_calibrations c JOIN companion_evaluation_runs r
+          ON r.tenant_id = c.tenant_id AND r.id = c.run_id WHERE c.tenant_id = ? AND r.grader_version = ? ORDER BY c.created_at DESC`).all(context.tenantId, graderVersion)
+      : this.database.prepare("SELECT * FROM companion_calibrations WHERE tenant_id = ? ORDER BY created_at DESC").all(context.tenantId)) as SqlRow[];
+    return rows.map((row) => ({
+      id: asString(row, "id"), tenantId: asString(row, "tenant_id"), runId: asString(row, "run_id"), itemId: asString(row, "item_id"),
+      band: asString(row, "band") as CompanionCalibration["band"], humanScore: Number(row.human_score), automaticScore: Number(row.automatic_score), notes: asString(row, "notes"),
+    }));
+  }
+
+  enrollCompanionTrialParticipant(context: TenantContext, input: {
+    membershipId: string; startedAt?: string; excludesDirectIdentifiers: boolean; fictionalSensitiveExercises: boolean;
+  }): void {
+    const actor = this.requireTenantAdmin(context);
+    const target = { tenantId: context.tenantId, membershipId: input.membershipId };
+    this.requireActiveMembership(target);
+    if (!input.excludesDirectIdentifiers || !input.fictionalSensitiveExercises) {
+      throw new Error("Trial enrollment requires excluding direct identifiers and fictional assigned sensitive exercises");
+    }
+    const count = Number((this.database.prepare("SELECT COUNT(*) AS count FROM companion_trial_participants WHERE tenant_id = ?").get(context.tenantId) as SqlRow).count);
+    if (count >= 20) throw new Error("Internal trial is limited to 20 participants");
+    const startedAt = input.startedAt ?? new Date().toISOString();
+    this.database.prepare(`INSERT INTO companion_trial_participants
+      (tenant_id, membership_id, started_at, stage, excludes_direct_identifiers, fictional_sensitive_exercises)
+      VALUES (?, ?, ?, 'scripted', 1, 1)`)
+      .run(context.tenantId, input.membershipId, startedAt);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.trial.enrolled", "tenant_membership", input.membershipId, new Date().toISOString());
+  }
+
+  updateCompanionTrialParticipant(context: TenantContext, membershipId: string, input: {
+    stage?: "scripted" | "free_chat" | "completed"; willingToContinue?: boolean;
+  }): void {
+    const actor = this.requireTenantAdmin(context);
+    const existing = this.database.prepare("SELECT stage FROM companion_trial_participants WHERE tenant_id = ? AND membership_id = ?")
+      .get(context.tenantId, membershipId) as SqlRow | undefined;
+    if (!existing) throw new Error("Trial participant not found");
+    const currentStage = asString(existing, "stage") as "scripted" | "free_chat" | "completed";
+    const stage = input.stage ?? currentStage;
+    const allowedNext = { scripted: "free_chat", free_chat: "completed", completed: "completed" } as const;
+    if (stage !== currentStage && stage !== allowedNext[currentStage]) throw new Error("Trial stages must progress from scripted tasks to free chat to completed");
+    this.database.prepare(`UPDATE companion_trial_participants SET stage = ?, willing_to_continue = CASE WHEN ? IS NULL THEN willing_to_continue ELSE ? END,
+      exit_interviewed_at = CASE WHEN ? IS NULL THEN exit_interviewed_at ELSE ? END
+      WHERE tenant_id = ? AND membership_id = ?`)
+      .run(stage, input.willingToContinue === undefined ? null : 1, input.willingToContinue === undefined ? null : input.willingToContinue ? 1 : 0,
+        input.willingToContinue === undefined ? null : 1, new Date().toISOString(), context.tenantId, membershipId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "companion.trial.updated", "tenant_membership", membershipId, new Date().toISOString());
+  }
+
+  listCompanionTrialParticipants(context: TenantContext): Array<{ membershipId: string; startedAt: string; stage: "scripted" | "free_chat" | "completed"; willingToContinue: boolean | null }> {
+    this.requireTenantAdmin(context);
+    const rows = this.database.prepare(`SELECT membership_id, started_at, stage, willing_to_continue
+      FROM companion_trial_participants WHERE tenant_id = ? ORDER BY started_at`).all(context.tenantId) as SqlRow[];
+    return rows.map((row) => ({
+      membershipId: asString(row, "membership_id"), startedAt: asString(row, "started_at"),
+      stage: asString(row, "stage") as "scripted" | "free_chat" | "completed",
+      willingToContinue: row.willing_to_continue === null ? null : Boolean(row.willing_to_continue),
+    }));
+  }
+
+  getCompanionTrialReadout(context: TenantContext) {
+    this.requireTenantAdmin(context);
+    const reviewRows = this.database.prepare(`SELECT r.specifically_responsive, r.interrogation, r.ignored_ending, r.baseline_violation
+      FROM companion_quality_reviews r
+      JOIN companion_quality_samples s ON s.tenant_id = r.tenant_id AND s.id = r.sample_id
+      JOIN companion_trial_participants p ON p.tenant_id = s.tenant_id AND p.membership_id = s.membership_id AND s.created_at >= p.started_at
+      WHERE r.tenant_id = ?`).all(context.tenantId) as SqlRow[];
+    const memory = this.database.prepare(`SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN correct = 0 THEN 1 ELSE 0 END), 0) AS errors
+      FROM companion_memory_feedback f
+      JOIN companion_trial_participants p ON p.tenant_id = f.tenant_id AND p.membership_id = f.membership_id AND f.created_at >= p.started_at
+      WHERE f.tenant_id = ?`).get(context.tenantId) as SqlRow;
+    const turns = this.database.prepare(`SELECT t.buffered, t.created_at, t.first_visible_at, t.completed_at FROM companion_turns t
+      JOIN companion_trial_participants p ON p.tenant_id = t.tenant_id AND p.membership_id = t.membership_id AND t.created_at >= p.started_at
+      WHERE t.tenant_id = ? AND t.status = 'completed'`).all(context.tenantId) as SqlRow[];
+    const duration = (row: SqlRow, key: string) => row[key] ? Math.max(0, Date.parse(String(row[key])) - Date.parse(asString(row, "created_at"))) : null;
+    const participants = this.database.prepare(`SELECT started_at, willing_to_continue, exit_interviewed_at
+      FROM companion_trial_participants WHERE tenant_id = ?`).all(context.tenantId) as SqlRow[];
+    const metrics = calculateCompanionTrialMetrics({
+      baselineViolations: reviewRows.filter((row) => Boolean(row.baseline_violation)).length,
+      sampledConversations: reviewRows.map((row) => ({ specificallyResponsive: Boolean(row.specifically_responsive), interrogation: Boolean(row.interrogation), ignoredEnding: Boolean(row.ignored_ending) })),
+      memoryErrors: Number(memory.errors), memoryChecks: Number(memory.total),
+      ordinaryFirstVisibleMs: turns.filter((row) => !Boolean(row.buffered)).map((row) => duration(row, "first_visible_at")).filter((value): value is number => value !== null),
+      ordinaryCompletionMs: turns.filter((row) => !Boolean(row.buffered)).map((row) => duration(row, "completed_at")).filter((value): value is number => value !== null),
+      bufferedCompletionMs: turns.filter((row) => Boolean(row.buffered)).map((row) => duration(row, "completed_at")).filter((value): value is number => value !== null),
+      exitInterviews: participants.map((row) => ({ willingToContinue: row.exit_interviewed_at === null ? null : Boolean(row.willing_to_continue) })),
+    });
+    const trialDays = participants.length ? Math.min(...participants.map((row) => Math.floor((Date.now() - Date.parse(asString(row, "started_at"))) / 86_400_000))) : 0;
+    const fullEvaluationReady = Boolean(this.database.prepare(`SELECT 1 FROM companion_evaluation_runs
+      WHERE tenant_id = ? AND suite = 'full' AND status = 'completed' AND item_count = 500
+        AND fatal_count = 0 AND average_score >= 85
+        AND NOT EXISTS (
+          SELECT 1 FROM companion_trial_participants p
+          LEFT JOIN companion_assignments a ON a.tenant_id = p.tenant_id AND a.membership_id = p.membership_id
+          WHERE p.tenant_id = companion_evaluation_runs.tenant_id
+            AND (a.config_version_id IS NULL OR a.config_version_id <> companion_evaluation_runs.config_version_id)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM companion_trial_participants p
+          WHERE p.tenant_id = companion_evaluation_runs.tenant_id AND companion_evaluation_runs.created_at < p.started_at
+        ) LIMIT 1`).get(context.tenantId));
+    return {
+      ...metrics, participantCount: participants.length, trialDays, fullEvaluationReady,
+      expansionAllowed: participants.length >= 10 && participants.length <= 20 && trialDays >= 14 && fullEvaluationReady && passesCompanionTrialGate(metrics),
+    };
   }
 
   getCompanionConsent(context: TenantContext): CompanionConsent {
@@ -2117,57 +2915,38 @@ export class TenantStore {
     `).run(new Date().toISOString(), tokenHash);
   }
 
+  listTenantAuditEvents(context: TenantContext, limit = 200): TenantAuditEvent[] {
+    this.requireTenantAdmin(context);
+    const boundedLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
+    const rows = this.database.prepare(`SELECT id, tenant_id, actor_user_id, actor_membership_id,
+      action, target_type, target_id, created_at FROM audit_events
+      WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?`).all(context.tenantId, boundedLimit) as SqlRow[];
+    return rows.map((row) => ({
+      id: asString(row, "id"), tenantId: asString(row, "tenant_id"), actorUserId: row.actor_user_id as string | null,
+      actorMembershipId: row.actor_membership_id as string | null, action: asString(row, "action"), targetType: asString(row, "target_type"),
+      targetId: row.target_id as string | null, createdAt: asString(row, "created_at"),
+    }));
+  }
+
   private migrate(): void {
     const current = this.schemaVersion();
     if (current > TENANT_SCHEMA_VERSION) {
       throw new Error(`Tenant database schema ${current} is newer than supported ${TENANT_SCHEMA_VERSION}`);
     }
-    if (current === 0) {
-      this.transaction(() => {
-        this.database.exec(MIGRATION_1);
-        this.database.exec(MIGRATION_2);
-        this.database.exec(MIGRATION_3);
-        this.database.exec(MIGRATION_4);
-        this.database.exec(MIGRATION_5);
-        this.database.exec(MIGRATION_6);
-        this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
-      });
-    } else if (current === 1) {
-      this.transaction(() => {
-        this.database.exec(MIGRATION_2);
-        this.database.exec(MIGRATION_3);
-        this.database.exec(MIGRATION_4);
-        this.database.exec(MIGRATION_5);
-        this.database.exec(MIGRATION_6);
-        this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
-      });
-    } else if (current === 2) {
-      this.transaction(() => {
-        this.database.exec(MIGRATION_3);
-        this.database.exec(MIGRATION_4);
-        this.database.exec(MIGRATION_5);
-        this.database.exec(MIGRATION_6);
-        this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
-      });
-    } else if (current === 3) {
-      this.transaction(() => {
-        this.database.exec(MIGRATION_4);
-        this.database.exec(MIGRATION_5);
-        this.database.exec(MIGRATION_6);
-        this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
-      });
-    } else if (current === 4) {
-      this.transaction(() => {
-        this.database.exec(MIGRATION_5);
-        this.database.exec(MIGRATION_6);
-        this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
-      });
-    } else if (current === 5) {
-      this.transaction(() => {
-        this.database.exec(MIGRATION_6);
-        this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
-      });
-    }
+    if (current === TENANT_SCHEMA_VERSION) return;
+    const migrations = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8];
+    this.transaction(() => {
+      for (let index = current; index < migrations.length; index += 1) {
+        if (index === 7) {
+          const evaluationColumns = this.database.prepare("PRAGMA table_info(companion_evaluation_runs)").all() as SqlRow[];
+          if (!evaluationColumns.some((row) => row.name === "results_json")) this.database.exec("ALTER TABLE companion_evaluation_runs ADD COLUMN results_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(results_json))");
+          const calibrationColumns = this.database.prepare("PRAGMA table_info(companion_calibrations)").all() as SqlRow[];
+          if (!calibrationColumns.some((row) => row.name === "item_id")) this.database.exec("ALTER TABLE companion_calibrations ADD COLUMN item_id TEXT NOT NULL DEFAULT ''");
+        }
+        this.database.exec(migrations[index]);
+      }
+      this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
+    });
   }
 
   private requireActiveMembership(context: TenantContext): Membership {

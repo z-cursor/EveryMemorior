@@ -53,6 +53,7 @@ export const enLocale: LocalePlugin = {
     "auth.logOut": "Log out",
     "auth.loggingOut": "Logging out...",
     "auth.logoutFailed": "Could not log out. Try again.",
+    "settings.quality": "Companion quality",
     "skills.scope.global": "global",
     "skills.scope.project": "project",
     "skills.scope.path": "path",

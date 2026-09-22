@@ -53,6 +53,7 @@ export const zhCNLocale: LocalePlugin = {
     "auth.logOut": "退出登录",
     "auth.loggingOut": "正在退出...",
     "auth.logoutFailed": "退出失败，请重试。",
+    "settings.quality": "陪伴质量治理",
     "skills.scope.global": "全局",
     "skills.scope.project": "项目",
     "skills.scope.path": "路径",

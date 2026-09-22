@@ -9,6 +9,7 @@ type Fragment = { id: string; summary: string };
 type Understanding = {
   explanation: string;
   consent: { memoryEnabled: boolean };
+  reviewConsent: { enabled: boolean };
   memories: Memory[];
   profile: Profile[];
   fragments: Fragment[];
@@ -112,6 +113,11 @@ export function CompanionUnderstandingPanel({ onClose }: { onClose: () => void }
 
         <section className={styles.section} aria-labelledby="display-title"><h3 id="display-title">显示设置</h3><div className={styles.form}><label>文字大小<select defaultValue="normal" onChange={(event) => applyDisplayPreference("companionTextSize", event.target.value)}><option value="normal">标准</option><option value="large">大</option><option value="largest">最大</option></select></label><label>对比度<select defaultValue="normal" onChange={(event) => applyDisplayPreference("companionContrast", event.target.value)}><option value="normal">标准</option><option value="high">高对比</option></select></label></div></section>
         <section className={styles.section} aria-labelledby="privacy-title"><h3 id="privacy-title">隐私说明</h3><p className={styles.muted}>原始陪伴消息在内部试用中默认保留不超过 90 天（当前设置：{data?.privacy.rawRetentionDays ?? 90} 天）。删除来源消息时，相关候选、证据和摘要会同步移除；已确认记忆由您另行决定是否删除。</p></section>
+        <section className={styles.section} aria-labelledby="review-consent-title">
+          <h3 id="review-consent-title">有限人工质量复核</h3>
+          <p className={styles.muted}>这是与长期记忆分开的选择。只有您同意后，授权 Owner/Admin 才能查看最多六条必要对话片段及当时的配置版本；不会开放完整聊天历史。撤回后不再产生新的抽样，正常聊天不受影响。</p>
+          <label className={styles.switch}><input type="checkbox" checked={data?.reviewConsent.enabled ?? false} onChange={(event) => void applyUnderstandingUpdate({ action: "set_review_consent", enabled: event.target.checked }, event.target.checked ? "已同意有限人工质量复核" : "已撤回人工质量复核同意")} />允许将必要对话片段用于有限人工质量复核</label>
+        </section>
       </aside>
     </div>
   );
