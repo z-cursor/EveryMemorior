@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CompanionUnderstandingPanel } from "./CompanionUnderstandingPanel";
 
 type CompanionMessage = { id: string; entryId?: string; role: "user" | "assistant"; text: string; incomplete?: boolean; buffered?: boolean; sources?: Array<{ title: string; url: string }> };
@@ -18,32 +18,62 @@ type CompanionEvent = {
 };
 
 type MemoryNotice = { id: string; content: string; confirmation: boolean };
+export type CompanionThinkingLevel = "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type CompanionController = {
+  send: (text: string) => Promise<void>;
+  stop: () => Promise<void>;
+  compact: () => Promise<void>;
+  setThinkingLevel: (level: CompanionThinkingLevel) => Promise<void>;
+};
 
 function newMessageId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
 
-export function CompanionShell() {
+function companionErrorMessage(value: string): string {
+  try {
+    const parsed = JSON.parse(value) as { error?: string };
+    value = parsed.error ?? value;
+  } catch {}
+  if (/model is not available in the enabled scope|companion model .* is not available/i.test(value)) {
+    return "凡小忆暂时无法连接到已配置的模型。请管理员在「设置 → 模型」确认模型可用，并在「陪伴质量治理 → 配置与发布」检查陪伴模型。模型容器运行中不代表应用已选中同一个模型。";
+  }
+  if (/\bENOENT\b|no such file or directory/i.test(value)) {
+    return "陪伴对话记录暂时无法读取，正在恢复会话。请刷新页面后重试。";
+  }
+  return value;
+}
+
+export function CompanionShell({ onController, onBusyChange, onThinkingLevelChange, onConversationStarted, embedded = false, understandingOpen, onUnderstandingOpenChange }: {
+  onController?: (controller: CompanionController | null) => void;
+  onBusyChange?: (busy: boolean) => void;
+  onThinkingLevelChange?: (level: CompanionThinkingLevel) => void;
+  onConversationStarted?: (started: boolean) => void;
+  embedded?: boolean;
+  understandingOpen: boolean;
+  onUnderstandingOpenChange: (open: boolean) => void;
+}) {
   const [messages, setMessages] = useState<CompanionMessage[]>([]);
-  const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("凡小忆随时在这里听您说。凡小忆是 AI，不能联系、定位、报警或救援。");
+  const [status, setStatus] = useState("");
   const [error, setError] = useState("");
-  const [understandingOpen, setUnderstandingOpen] = useState(false);
   const [memoryNotices, setMemoryNotices] = useState<MemoryNotice[]>([]);
-  const activeId = useRef<string | null>(null);
   const requestRef = useRef<AbortController | null>(null);
+
+  useEffect(() => onBusyChange?.(busy), [busy, onBusyChange]);
+  useEffect(() => onConversationStarted?.(messages.length > 0), [messages.length, onConversationStarted]);
 
   useEffect(() => {
     document.documentElement.dataset.companionTextSize = localStorage.getItem("companionTextSize") ?? "normal";
     document.documentElement.dataset.companionContrast = localStorage.getItem("companionContrast") ?? "normal";
     let mounted = true;
     void fetch("/api/companion", { cache: "no-store" }).then(async (response) => {
-      if (!response.ok) throw new Error(await response.text());
-      return response.json() as Promise<{ history?: Array<{ entryId?: string; role: "user" | "assistant"; text: string }> }>;
+      if (!response.ok) throw new Error(companionErrorMessage(await response.text()));
+      return response.json() as Promise<{ history?: Array<{ entryId?: string; role: "user" | "assistant"; text: string }>; config?: { thinkingLevel?: CompanionThinkingLevel } }>;
     }).then((data) => {
       if (!mounted) return;
       setMessages((data.history ?? []).map((message, index) => ({ ...message, id: `history-${index}` })));
+      if (data.config?.thinkingLevel) onThinkingLevelChange?.(data.config.thinkingLevel);
     }).catch((cause) => mounted && setError(cause instanceof Error ? cause.message : String(cause)));
     const source = new EventSource("/api/companion/events");
     source.onmessage = (message) => {
@@ -62,7 +92,7 @@ export function CompanionShell() {
         let next = currentMessage;
         if (event.type === "turn_started") {
           next = { ...currentMessage, buffered: event.buffered, text: "" };
-          setStatus(event.buffered ? "这条消息需要先核对一下，请稍等。" : "凡小忆正在想一想……");
+          setStatus("");
         } else if (event.type === "text_delta") {
           next = { ...currentMessage, text: currentMessage.text + (event.text ?? "") };
           setStatus("");
@@ -78,23 +108,22 @@ export function CompanionShell() {
       });
     };
     return () => { mounted = false; source.close(); requestRef.current?.abort(); };
-  }, []);
+  }, [onThinkingLevelChange]);
 
-  const send = async () => {
-    const text = draft.trim();
+  const send = useCallback(async (rawText: string) => {
+    const text = rawText.trim();
     if (!text || busy) return;
     const clientMessageId = newMessageId();
-    activeId.current = clientMessageId;
     setMessages((current) => [...current, { id: `user-${clientMessageId}`, role: "user", text }]);
-    setDraft("");
     setBusy(true);
+    setStatus("");
     setError("");
     const controller = new AbortController();
     requestRef.current = controller;
     try {
       const response = await fetch("/api/companion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientMessageId, text }), signal: controller.signal });
       const data = await response.json() as { error?: string; turn?: { replyText?: string | null; status?: string } };
-      if (!response.ok) throw new Error(data.error ?? "暂时无法回复");
+      if (!response.ok) throw new Error(companionErrorMessage(data.error ?? "暂时无法回复"));
       if (data.turn?.replyText) {
         const replyText = data.turn.replyText;
         setMessages((current) => {
@@ -105,21 +134,37 @@ export function CompanionShell() {
           return [...current, { id, role: "assistant", text: replyText }];
         });
       }
+      window.dispatchEvent(new Event("companion:history-changed"));
     } catch (cause) {
       if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       requestRef.current = null;
-      activeId.current = null;
       setBusy(false);
     }
-  };
+  }, [busy]);
 
-  const stop = async () => {
+  const stop = useCallback(async () => {
     requestRef.current?.abort();
     await fetch("/api/companion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) }).catch(() => undefined);
     setBusy(false);
     setStatus("已停止这次回复。");
-  };
+  }, []);
+
+  const compact = useCallback(async () => {
+    const response = await fetch("/api/companion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "compact" }) });
+    if (!response.ok) throw new Error("无法整理当前陪伴对话，请稍后重试。");
+    setStatus("已整理对话上下文。");
+  }, []);
+
+  const setThinkingLevel = useCallback(async (level: CompanionThinkingLevel) => {
+    const response = await fetch("/api/companion", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "set_thinking_level", level }) });
+    if (!response.ok) throw new Error("无法更改思考强度，请稍后重试。");
+  }, []);
+
+  useEffect(() => {
+    onController?.({ send, stop, compact, setThinkingLevel });
+    return () => onController?.(null);
+  }, [onController, send, stop, compact, setThinkingLevel]);
 
   const memoryAction = async (memoryNotice: MemoryNotice, action: "confirm_memory" | "delete_memory") => {
     const response = await fetch("/api/companion/understanding", {
@@ -159,25 +204,14 @@ export function CompanionShell() {
   };
 
   return (
-    <main className="companion-shell">
-      <header className="companion-header">
-        <div><span className="companion-eyebrow">陪伴对话</span><h1>凡小忆</h1><p>您的 AI 陪伴伙伴</p></div>
-        <div><button type="button" className="companion-privacy" onClick={() => setUnderstandingOpen(true)}>凡小忆对我的了解</button><button type="button" className="companion-privacy" onClick={() => setStatus("您可以随时停止、纠正或结束对话。长期记忆需要单独同意；凡小忆不会执行现实救援。")}>隐私说明</button></div>
-      </header>
-      <section className="companion-notice" aria-label="凡小忆说明">凡小忆是 AI，不是真人。它可以陪您聊天，但不能替您联系家人、报警、定位或进行现实救援。</section>
-      <section className="companion-notice" aria-label="长期记忆说明">长期记忆默认关闭；不开启也能正常聊天。开启后，普通稳定偏好会显示可撤销回执，敏感信息仍需您逐条确认。 <button type="button" className="companion-privacy" onClick={() => setUnderstandingOpen(true)}>了解与设置</button></section>
+    <main className={`companion-inline${embedded && messages.length === 0 ? " is-empty" : ""}`}>
       <section className="companion-messages" aria-live="polite" aria-label="与凡小忆的对话">
-        {messages.length === 0 && <div className="companion-welcome"><h2>您好，我是凡小忆。</h2><p>您可以从今天的心情、身边的小事，或者任何想说的话开始。</p></div>}
-        {messages.map((message) => <article className={`companion-message is-${message.role}`} key={message.id}><span className="companion-message-label">{message.role === "user" ? "您" : "凡小忆 · AI"}</span><p>{message.text || (message.buffered ? "正在核对，请稍等……" : "正在想一想……")}</p>{message.role === "user" && message.entryId && <button type="button" className="companion-privacy" onClick={() => void deleteSource(message)}>删除这条消息</button>}{message.incomplete && <small>未完成回复 · 不会作为下一次对话的依据</small>}{message.sources && message.sources.length > 0 && <details><summary>查看来源</summary><ul>{message.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul></details>}</article>)}
-        {memoryNotices.map((memoryNotice) => <aside className="companion-notice" aria-live="polite" key={memoryNotice.id}><strong>{memoryNotice.confirmation ? "这是一项敏感信息，是否确认记住？" : "记忆回执"}</strong><p>{memoryNotice.content}</p><button type="button" className="companion-privacy" onClick={() => void memoryAction(memoryNotice, memoryNotice.confirmation ? "confirm_memory" : "delete_memory")}>{memoryNotice.confirmation ? "确认记住" : "撤销记忆"}</button>{memoryNotice.confirmation && <button type="button" className="companion-privacy" onClick={() => void memoryAction(memoryNotice, "delete_memory")}>不要记住</button>}</aside>)}
+        {messages.length === 0 && <article className="companion-message is-assistant companion-welcome"><span className="companion-message-label">凡小忆 · AI</span><p>你好，我是凡小忆。想聊聊今天的心情，或任何你愿意分享的事吗？凡小忆是 AI，不能联系家人、报警、定位或进行现实救援。</p></article>}
+        {messages.map((message) => <article className={`companion-message is-${message.role}${message.role === "assistant" && !message.text ? " is-pending" : ""}`} key={message.id}>{message.role === "assistant" && <span className="companion-message-label">凡小忆 · AI</span>}<p>{message.text || (message.buffered ? "正在核对，请稍等……" : "正在想一想……")}</p>{message.role === "user" && message.entryId && <button type="button" className="companion-privacy" onClick={() => void deleteSource(message)}>删除这条消息</button>}{message.incomplete && <small>未完成回复 · 不会作为下一次对话的依据</small>}{message.sources && message.sources.length > 0 && <details><summary>查看来源</summary><ul>{message.sources.map((source) => <li key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a></li>)}</ul></details>}</article>)}
+        {memoryNotices.map((memoryNotice) => <aside className="companion-notice companion-memory-notice" aria-live="polite" key={memoryNotice.id}><strong>{memoryNotice.confirmation ? "这是一项敏感信息，是否确认记住？" : "记忆回执"}</strong><p>{memoryNotice.content}</p><button type="button" className="companion-privacy" onClick={() => void memoryAction(memoryNotice, memoryNotice.confirmation ? "confirm_memory" : "delete_memory")}>{memoryNotice.confirmation ? "确认记住" : "撤销记忆"}</button>{memoryNotice.confirmation && <button type="button" className="companion-privacy" onClick={() => void memoryAction(memoryNotice, "delete_memory")}>不要记住</button>}</aside>)}
         {(status || error) && <p className={error ? "companion-error" : "companion-status"} role={error ? "alert" : "status"}>{error || status}</p>}
       </section>
-      <form className="companion-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
-        <label htmlFor="companion-input">想和凡小忆说点什么？</label>
-        <textarea id="companion-input" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="请写下您想说的话" rows={3} disabled={busy} />
-        <div className="companion-composer-actions"><span>按 Enter 发送，Shift + Enter 换行</span>{busy ? <button type="button" onClick={() => void stop()}>停止回复</button> : <button type="submit" disabled={!draft.trim()}>发送</button>}</div>
-      </form>
-      {understandingOpen && <CompanionUnderstandingPanel onClose={() => setUnderstandingOpen(false)} />}
+      {understandingOpen && <CompanionUnderstandingPanel onClose={() => onUnderstandingOpenChange(false)} />}
     </main>
   );
 }

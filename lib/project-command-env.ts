@@ -7,6 +7,7 @@ import {
   type LoadExtensionsResult,
 } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
+import { runAgentSandboxCommand } from "./tenant-agent-runtime";
 
 const HOST_EXTENSION_NAME = "pi-web-project-command-environment";
 const HOST_EXTENSION_PATH = `<inline:${HOST_EXTENSION_NAME}>`;
@@ -17,6 +18,7 @@ type ProjectShellSettings = {
 };
 
 type ProjectCommandBashOperationsOptions = {
+  agentSessionId?: string;
   agentBinDir?: string;
   baseEnvironment?: NodeJS.ProcessEnv;
   localOperations?: BashOperations;
@@ -69,6 +71,19 @@ export function createProjectCommandBashOperations(
     platform = process.platform,
   } = options;
 
+  if (options.agentSessionId) {
+    return {
+      async exec(command, _cwd, executionOptions) {
+        const result = await runAgentSandboxCommand(options.agentSessionId!, command, {
+          signal: executionOptions.signal,
+          timeoutMs: executionOptions.timeout,
+          onOutput: executionOptions.onData,
+        });
+        return { exitCode: result.exitCode };
+      },
+    };
+  }
+
   return {
     exec(command, cwd, executionOptions) {
       const environment = withAgentBinDirectory(
@@ -99,6 +114,9 @@ export function createProjectCommandBashExtension(options: {
           const executionDefinition = createBashToolDefinition(options.cwd, {
             commandPrefix: options.settings.getShellCommandPrefix(),
             operations: createProjectCommandBashOperations({
+              // Runtime contexts provide a session manager. Keeping this
+              // optional also allows metadata-only extension inspection.
+              agentSessionId: context?.sessionManager?.getSessionId(),
               shellPath: options.settings.getShellPath(),
             }),
           });

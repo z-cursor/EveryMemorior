@@ -1,0 +1,33 @@
+diff --git a/lib/rpc-manager.ts b/lib/rpc-manager.ts
+--- a/lib/rpc-manager.ts
++++ b/lib/rpc-manager.ts
+@@ -1,1 +1,2 @@
+ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
++import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
+@@ -234,4 +234,5 @@ export class AgentSessionWrapper {
+   private extensionsBound = false;
+   private extensionBindingPromise: Promise<void> | null = null;
+   private extensionBindingError: unknown = null;
++  private exactContextMessages: PiAgentMessage[] | undefined;
+   private readonly exactSystemPrompt?: () => string;
+@@ -429,6 +429,7 @@ export class AgentSessionWrapper {
+       return {
+         ...prepared,
+         context: {
+           ...(prepared?.context ?? turn.context),
+           systemPrompt: this.exactSystemPrompt!(),
++          ...(this.exactContextMessages ? { messages: this.exactContextMessages } : {}),
+         },
+@@ -433,6 +433,11 @@ export class AgentSessionWrapper {
+           systemPrompt: this.exactSystemPrompt!(),
+         },
+       };
+     };
+   }
+ 
++  /** Replace the model-visible transcript for the next companion turn only. */
++  setExactContextMessages(messages: PiAgentMessage[]): void {
++    this.exactContextMessages = messages;
++  }
++
+   setActiveToolSelection(toolNames: string[]): void {

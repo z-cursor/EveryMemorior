@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +12,7 @@ const originalDatabasePath = process.env.PI_WEB_DATABASE_PATH;
 process.env.PI_WEB_DATABASE_PATH = join(root, "tenant.sqlite");
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, interopDefault: true, moduleCache: false });
 const { GET, PATCH } = await jiti.import("./route.ts");
-const { setupTenantOwner, TENANT_SESSION_COOKIE } = await jiti.import("../../../../lib/tenant-auth.ts");
+const { acceptTenantInvitation, setupTenantOwner, TENANT_SESSION_COOKIE } = await jiti.import("../../../../lib/tenant-auth.ts");
 const { closeTenantStore, getTenantStore } = await jiti.import("../../../../lib/tenant-store.ts");
 const auth = await setupTenantOwner({
   tenantName: "Memory", tenantSlug: "memory", displayName: "Owner",
@@ -20,9 +21,9 @@ const auth = await setupTenantOwner({
 const cookie = `${TENANT_SESSION_COOKIE}=${auth.token}`;
 const context = { tenantId: auth.session.tenant.id, membershipId: auth.session.membership.id };
 
-function request(method, body) {
+function request(method, body, sessionCookie = cookie) {
   return new NextRequest("http://localhost/api/companion/understanding", {
-    method, headers: { Cookie: cookie, ...(body ? { "Content-Type": "application/json" } : {}) },
+    method, headers: { Cookie: sessionCookie, ...(body ? { "Content-Type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
 }
@@ -32,6 +33,29 @@ after(() => {
   if (originalDatabasePath === undefined) delete process.env.PI_WEB_DATABASE_PATH;
   else process.env.PI_WEB_DATABASE_PATH = originalDatabasePath;
   rmSync(root, { recursive: true, force: true });
+});
+
+test("admin has their own companion memory consent and profile", async () => {
+  const token = "admin-memory-invitation";
+  getTenantStore().createInvitation(context, {
+    email: "admin@memory.test", role: "admin",
+    tokenHash: createHash("sha256").update(token).digest("hex"),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const admin = await acceptTenantInvitation({ token, displayName: "Admin", password: "correct horse battery staple" });
+  const adminCookie = `${TENANT_SESSION_COOKIE}=${admin.token}`;
+  const adminContext = { tenantId: admin.session.tenant.id, membershipId: admin.session.membership.id };
+  const assignment = getTenantStore().ensureCompanionAssignment(adminContext, "admin-companion-session");
+  assert.equal(assignment.membershipId, adminContext.membershipId);
+  assert.equal(getTenantStore().getCompanionAssignment(context), null);
+  const initial = await GET(request("GET", undefined, adminCookie));
+  assert.equal((await initial.json()).consent.memoryEnabled, false);
+  assert.equal((await PATCH(request("PATCH", { action: "set_consent", enabled: true }, adminCookie))).status, 200);
+  assert.equal((await PATCH(request("PATCH", { action: "set_profile", field: "form_of_address", value: "小何" }, adminCookie))).status, 200);
+  const own = await GET(request("GET", undefined, adminCookie));
+  assert.equal((await own.json()).profile.find((item) => item.field === "form_of_address")?.value, "小何");
+  const owner = await GET(request("GET"));
+  assert.equal((await owner.json()).profile.some((item) => item.value === "小何"), false);
 });
 
 test("member can stay memory-off, opt in independently, and inspect the privacy boundary", async () => {
@@ -79,6 +103,17 @@ test("member controls only the restricted Companion Profile", async () => {
   }));
   assert.equal(prohibited.status, 400);
   assert.match((await prohibited.json()).error, /Profile field/i);
+});
+
+test("profile dropdown values can be saved again without changing their meaning", async () => {
+  for (const [field, value] of [["boundaries", "no_follow_up_questions"], ["topics", "饮食"]]) {
+    const response = await PATCH(request("PATCH", { action: "set_profile", field, value }));
+    const body = await response.json();
+    assert.equal(response.status, 200, `${field}: ${JSON.stringify(body)}`);
+    assert.equal(body.profile.value, value);
+    const savedAgain = await PATCH(request("PATCH", { action: "set_profile", field, value: body.profile.value }));
+    assert.equal(savedAgain.status, 200);
+  }
 });
 
 test("member can inspect, correct, delete, and reset older fragment summaries", async () => {

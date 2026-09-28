@@ -13,6 +13,7 @@ type TerminalListener = (event: TerminalEvent) => void;
 interface TerminalRecord {
   pty: IPty;
   cwd: string;
+  tenantId?: string;
   listeners: Set<TerminalListener>;
   backlog: string;
   offset: number;
@@ -69,10 +70,11 @@ function dimension(value: number, fallback: number): number {
   return Math.min(1000, Math.max(2, Number.isFinite(value) ? Math.floor(value) : fallback));
 }
 
-export function createTerminal(cwd: string, cols: number, rows: number, id: string = randomUUID()): string {
+export function createTerminal(cwd: string, cols: number, rows: number, id: string = randomUUID(), tenantId?: string): string {
   const existing = registry().get(id);
   if (existing) {
     if (!samePath(existing.cwd, cwd)) throw new Error("Terminal belongs to a different workspace");
+    if (existing.tenantId !== tenantId) throw new Error("Terminal belongs to a different tenant");
     return id;
   }
   let spawn: typeof import("node-pty").spawn;
@@ -104,6 +106,7 @@ export function createTerminal(cwd: string, cols: number, rows: number, id: stri
   const record: TerminalRecord = {
     pty,
     cwd,
+    tenantId,
     listeners: new Set(),
     backlog: "",
     offset: 0,
@@ -137,6 +140,10 @@ export function hasTerminal(id: string): boolean {
 
 export function getTerminalCwd(id: string): string | undefined {
   return registry().get(id)?.cwd;
+}
+
+export function getTerminalTenantId(id: string): string | undefined {
+  return registry().get(id)?.tenantId;
 }
 
 export function subscribeTerminal(

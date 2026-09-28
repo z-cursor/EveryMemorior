@@ -112,32 +112,32 @@ export function ModelSelector({
         height: 34,
         padding: "0 9px",
         overflow: "hidden",
-        border: "1px solid var(--border)",
-        borderRadius: 5,
+        border: "var(--border-width) solid var(--border)",
+        borderRadius: "var(--radius-item)",
         background: locked ? "var(--bg-panel)" : "var(--bg)",
         color: locked ? "var(--text-dim)" : "var(--text)",
         cursor: locked ? "default" : "pointer",
-        fontSize: 12,
+        fontSize: "var(--font-size-control)",
         textAlign: "left",
       }
     : {
         display: "flex",
         alignItems: "center",
         justifyContent: isMobile ? "flex-start" : undefined,
-        gap: 6,
+        gap: "var(--space-1-5)",
         width: isMobile ? "100%" : undefined,
         maxWidth: isMobile ? "100%" : 220,
         height: 32,
         padding: isMobile ? "8px 10px" : "8px 12px",
         overflow: "hidden",
         border: "none",
-        borderRadius: 9,
+        borderRadius: "var(--radius-button)",
         background: open ? "var(--bg-hover)" : "none",
         color: "var(--text-muted)",
         cursor: locked ? "not-allowed" : "pointer",
-        fontSize: 12,
+        fontSize: "var(--font-size-control)",
         opacity: locked ? 0.5 : 1,
-        transition: "background 0.12s, color 0.12s",
+        transition: "background var(--duration-fast), color var(--duration-fast)",
       };
 
   const choose = (option: ModelSelectorOption) => {
@@ -242,14 +242,14 @@ export function ModelSelector({
               flexDirection: "column",
               maxHeight,
               overflow: "hidden",
-              border: "1px solid var(--border)",
-              borderRadius: 8,
+              border: "var(--border-width) solid var(--border)",
+              borderRadius: "var(--radius-panel)",
               background: "var(--bg)",
               boxShadow: openAbove ? "0 -4px 16px rgba(0,0,0,0.10)" : "0 4px 16px rgba(0,0,0,0.10)",
             }}
           >
             {showFilter && (
-              <div style={{ flexShrink: 0, padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
+              <div style={{ flexShrink: 0, padding: "var(--space-1-5) var(--space-2)", borderBottom: "var(--border-width) solid var(--border)" }}>
                 <input
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
@@ -262,14 +262,14 @@ export function ModelSelector({
                     boxSizing: "border-box",
                     width: "100%",
                     minWidth: isMobile ? 0 : 220,
-                    padding: "5px 8px",
-                    border: "1px solid var(--border)",
-                    borderRadius: 5,
+                    padding: "5px var(--space-2)",
+                    border: "var(--border-width) solid var(--border)",
+                    borderRadius: "var(--radius-item)",
                     outline: "none",
                     background: "var(--bg)",
                     color: "var(--text)",
                     fontFamily: "var(--font-mono)",
-                    fontSize: 11,
+                    fontSize: "var(--font-size-meta)",
                   }}
                 />
               </div>
@@ -283,13 +283,13 @@ export function ModelSelector({
                 }} />
               )}
               {modelsByProvider.length === 0 ? (
-                <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
+                <div style={{ padding: "var(--space-2) var(--space-3)", color: "var(--text-dim)", fontSize: "var(--font-size-control)", whiteSpace: "nowrap" }}>
                   {filter.trim() ? t("chat.noMatchingModels") : "No available models"}
                 </div>
               ) : modelsByProvider.map((group, index) => (
                 <div key={group.provider}>
                   {modelsByProvider.length > 1 && (
-                    <div style={{ padding: "6px 12px 4px", borderTop: index > 0 || onClear ? "1px solid var(--border)" : "none", color: "var(--text-dim)", fontSize: 10, fontWeight: 600, letterSpacing: 0, textTransform: "uppercase" }}>
+                    <div style={{ padding: "var(--space-1-5) var(--space-3) var(--space-1)", borderTop: index > 0 || onClear ? "var(--border-width) solid var(--border)" : "none", color: "var(--text-dim)", fontSize: "var(--font-size-caption)", fontWeight: 600, letterSpacing: 0, textTransform: "uppercase" }}>
                       {group.provider}
                     </div>
                   )}
@@ -318,7 +318,7 @@ function ModelOptionButton({ active, label, onClick }: { active: boolean; label:
       role="option"
       aria-selected={active}
       onClick={onClick}
-      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 12px", border: "none", background: active ? "var(--bg-selected)" : "none", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, fontWeight: active ? 600 : 400, textAlign: "left", whiteSpace: "nowrap" }}
+      style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", width: "100%", padding: "7px var(--space-3)", border: "none", background: active ? "var(--bg-selected)" : "none", color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: "var(--font-size-control)", fontWeight: active ? 600 : 400, textAlign: "left", whiteSpace: "nowrap" }}
       onMouseEnter={(event) => { if (!active) event.currentTarget.style.background = "var(--bg-hover)"; }}
       onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = "none"; }}
     >

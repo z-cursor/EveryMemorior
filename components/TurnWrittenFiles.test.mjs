@@ -17,7 +17,7 @@ function render(props) {
   );
 }
 
-test("renders a button per file showing the basename and full path", () => {
+test("renders a preview button and a virtual-workspace download link per file", () => {
   const html = render({
     files: [{ filePath: "/abs/out/report.html" }, { filePath: "/abs/out/data.json" }],
     onOpenFile() {},
@@ -25,8 +25,16 @@ test("renders a button per file showing the basename and full path", () => {
   assert.match(html, /<button/);
   assert.match(html, /report\.html/);
   assert.match(html, /data\.json/);
-  assert.match(html, /title="\/abs\/out\/report\.html"/);
-  assert.match(html, /title="\/abs\/out\/data\.json"/);
+  assert.match(html, /title="report\.html"/);
+  assert.match(html, /title="data\.json"/);
+  assert.match(html, /href="\/api\/files\/abs\/out\/report\.html\?type=download"/);
+  assert.match(html, /download="report\.html"/);
+});
+
+test("keeps tenant download links on the virtual workspace path", () => {
+  const html = render({ files: [{ filePath: "/workspace/index.html" }] });
+  assert.match(html, /href="\/api\/files\/workspace\/index\.html\?type=download"/);
+  assert.doesNotMatch(html, /tenant-workspaces|Users|AppData/);
 });
 
 test("renders nothing when no files were written", () => {

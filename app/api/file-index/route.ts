@@ -10,6 +10,9 @@ import {
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
+import { tenantWorkspaceRootsForRequest } from "@/lib/tenant-agent-runtime";
+import { requireTenantSession } from "@/lib/tenant-auth";
+import { workspaceErrorMessageForClient, workspacePathFromClient } from "@/lib/tenant-workspace";
 
 const execFileAsync = promisify(execFile);
 
@@ -116,13 +119,17 @@ function listWithWalk(cwd: string): FileListing {
 // Guarded by the same allow-list as /api/files.
 export async function GET(req: NextRequest) {
   try {
-    const cwd = req.nextUrl.searchParams.get("cwd")?.trim() ?? "";
-    if (!cwd || (!cwd.startsWith("/") && !isWindowsAbsolutePath(cwd))) {
+    const requestedCwd = req.nextUrl.searchParams.get("cwd")?.trim() ?? "";
+    if (!requestedCwd || (!requestedCwd.startsWith("/") && !isWindowsAbsolutePath(requestedCwd))) {
       return NextResponse.json({ error: "cwd must be an absolute path" }, { status: 400 });
     }
+    const cwd = workspacePathFromClient(requireTenantSession(req), requestedCwd);
+    if (!cwd) return NextResponse.json({ error: "Access denied" }, { status: 403 });
     const query = req.nextUrl.searchParams.get("q")?.slice(0, MAX_QUERY_LENGTH) ?? "";
 
-    const allowedRoots = await getAllowedFileRoots();
+    const globalRoots = await getAllowedFileRoots();
+    const allowedRoots = new Set(tenantWorkspaceRootsForRequest(req)
+      .filter((root) => isFilePathAllowed(root, globalRoots)));
     if (!isFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
@@ -164,6 +171,6 @@ export async function GET(req: NextRequest) {
       truncated: hardTruncated || files.length > MAX_FILES,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: workspaceErrorMessageForClient(req, error) }, { status: 500 });
   }
 }

@@ -129,12 +129,12 @@ function SkillDetail({
         </ConfigDetailHeader>
         <div className="skill-detail-status-row">
           {!enabled && (
-            <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            <span style={{ fontSize: "var(--font-size-meta)", color: "var(--text-dim)" }}>
               {t("i18n.hiddenButInvocable")}
             </span>
           )}
           {saveError && (
-            <span style={{ fontSize: 12, color: "#f87171", overflowWrap: "anywhere" }}>
+            <span style={{ fontSize: "var(--font-size-control)", color: "var(--palette-red-400)", overflowWrap: "anywhere" }}>
               {saveError}
             </span>
           )}
@@ -209,7 +209,7 @@ function SkillDetail({
             )}
           </div>
           {updateError && (
-            <span style={{ fontSize: 12, color: "#ef4444" }}>{updateError}</span>
+            <span style={{ fontSize: "var(--font-size-control)", color: "var(--palette-red-500)" }}>{updateError}</span>
           )}
         </ConfigField>
       )}
@@ -325,14 +325,14 @@ function AddSkillPanel({
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: 12,
+          gap: "var(--space-3)",
           marginBottom: 20,
         }}
       >
         <ConfigDetailTitle>{t("i18n.addSkill")}</ConfigDetailTitle>
 
         {/* Search row */}
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: "var(--space-2)" }}>
           <input
             ref={inputRef}
             value={query}
@@ -343,11 +343,11 @@ function AddSkillPanel({
              placeholder={t("i18n.skillSearchPlaceholder")}
             style={{
               flex: 1,
-              padding: "7px 10px",
-              fontSize: 12,
+              padding: "7px var(--space-2-5)",
+              fontSize: "var(--font-size-control)",
               background: "var(--bg-panel)",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
+              border: "var(--border-width) solid var(--border)",
+              borderRadius: "var(--radius-control)",
               color: "var(--text)",
               outline: "none",
             }}
@@ -362,14 +362,14 @@ function AddSkillPanel({
         </div>
 
         {/* Scope + install path row */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2-5)" }}>
           <div
             style={{
               display: "flex",
-              borderRadius: 5,
-              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-item)",
+              border: "var(--border-width) solid var(--border)",
               overflow: "hidden",
-              fontSize: 12,
+              fontSize: "var(--font-size-control)",
               flexShrink: 0,
             }}
           >
@@ -382,7 +382,7 @@ function AddSkillPanel({
                 disabled={s === "project" && !projectResourcesLoaded}
                 title={s === "project" && !projectResourcesLoaded ? t("trust.projectScopeUnavailable") : undefined}
                 style={{
-                  padding: "3px 10px",
+                  padding: "3px var(--space-2-5)",
                   border: "none",
                   cursor: s === "project" && !projectResourcesLoaded ? "not-allowed" : "pointer",
                   background: scope === s ? "var(--bg-selected)" : "none",
@@ -390,7 +390,7 @@ function AddSkillPanel({
                   fontWeight: scope === s ? 600 : 400,
                   opacity: s === "project" && !projectResourcesLoaded ? 0.45 : 1,
                   borderRight:
-                    s === "global" ? "1px solid var(--border)" : "none",
+                    s === "global" ? "var(--border-width) solid var(--border)" : "none",
                 }}
               >
                 {s}
@@ -399,7 +399,7 @@ function AddSkillPanel({
           </div>
           <span
             style={{
-              fontSize: 12,
+              fontSize: "var(--font-size-control)",
               color: "var(--text-dim)",
               fontFamily: "var(--font-mono)",
               overflow: "hidden",
@@ -413,11 +413,11 @@ function AddSkillPanel({
 
         {/* Errors */}
         {searchError && (
-          <div style={{ fontSize: 12, color: "#f87171" }}>{searchError}</div>
+          <div style={{ fontSize: "var(--font-size-control)", color: "var(--palette-red-400)" }}>{searchError}</div>
         )}
         {installError && (
           <div
-            style={{ fontSize: 12, color: "#f87171", wordBreak: "break-word" }}
+            style={{ fontSize: "var(--font-size-control)", color: "var(--palette-red-400)", wordBreak: "break-word" }}
           >
             {installError}
           </div>
@@ -442,16 +442,16 @@ function AddSkillPanel({
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  gap: 14,
-                  padding: "12px 0",
-                  borderBottom: "1px solid var(--border)",
+                  gap: "var(--space-3-5)",
+                  padding: "var(--space-3) 0",
+                  borderBottom: "var(--border-width) solid var(--border)",
                 }}
               >
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {/* skill name prominent */}
                   <div
                     style={{
-                      fontSize: 13,
+                      fontSize: "var(--font-size-label)",
                       fontWeight: 600,
                       color: "var(--text)",
                       marginBottom: 3,
@@ -464,14 +464,14 @@ function AddSkillPanel({
                     style={{
                       display: "flex",
                       alignItems: "center",
-                      gap: 10,
+                      gap: "var(--space-2-5)",
                       flexWrap: "wrap",
                     }}
                   >
                     <span
                       style={{
                         fontFamily: "var(--font-mono)",
-                        fontSize: 11,
+                        fontSize: "var(--font-size-meta)",
                         color: "var(--text-dim)",
                       }}
                     >
@@ -479,7 +479,7 @@ function AddSkillPanel({
                     </span>
                     <span
                       style={{
-                        fontSize: 12,
+                        fontSize: "var(--font-size-control)",
                         color: "var(--text-muted)",
                         fontWeight: 500,
                       }}
@@ -492,7 +492,7 @@ function AddSkillPanel({
                         target="_blank"
                         rel="noreferrer"
                         style={{
-                          fontSize: 12,
+                          fontSize: "var(--font-size-control)",
                           color: "var(--accent)",
                           textDecoration: "none",
                         }}
@@ -512,7 +512,7 @@ function AddSkillPanel({
                     flexShrink: 0,
                     background: isInstalled ? "rgba(34,197,94,0.1)" : "none",
                     color: isInstalled
-                      ? "#16a34a"
+                      ? "var(--palette-green-600)"
                       : isInstalling
                         ? "var(--accent)"
                         : "var(--text-muted)",
@@ -532,7 +532,7 @@ function AddSkillPanel({
         !searchError &&
         !searching && (
           <div
-            style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}
+            style={{ fontSize: "var(--font-size-label)", color: "var(--text-dim)", lineHeight: 1.8 }}
           >
             Search{" "}
             <a
@@ -916,7 +916,7 @@ export function SkillsConfig({
             Object.values(updateStatuses).filter(
               (status) => status.state === "update-available",
             ).length > 0 && (
-              <span style={{ fontSize: 12, color: "#d97706" }}>
+              <span style={{ fontSize: "var(--font-size-control)", color: "var(--palette-amber-600)" }}>
                 {
                   Object.values(updateStatuses).filter(
                     (status) => status.state === "update-available",

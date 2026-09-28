@@ -43,6 +43,27 @@ function dispatchPush(payload, clients) {
   return { pending, shown };
 }
 
+function dispatchFetch(pathname) {
+  let response;
+  listeners.get("fetch")({
+    request: {
+      method: "GET",
+      mode: "cors",
+      url: `https://pi.test${pathname}`,
+    },
+    respondWith: (promise) => { response = promise; },
+  });
+  return response;
+}
+
+test("does not intercept Next.js assets", () => {
+  globalThis.caches = {
+    match: async () => ({ body: "stale Turbopack chunk" }),
+  };
+
+  assert.equal(dispatchFetch("/_next/static/chunks/app/login.js"), undefined);
+});
+
 test("push always shows a notification, even when a window is visible", async () => {
   const event = dispatchPush(
     {

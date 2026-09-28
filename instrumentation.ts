@@ -13,7 +13,7 @@ export async function register(): Promise<void> {
   for (const target of store.listCompanionRetentionTargets()) {
     try {
       store.getCompanionConsent(target);
-      scheduleCompanionContinuityWorker(store, target, `companion-${process.pid}`, undefined, 0, ["fragment_summary"]);
+      scheduleCompanionContinuityWorker(store, target, "companion-startup", undefined, 0, ["fragment_summary"]);
     } catch { /* Suspended relationships retain data but do not run personalization jobs. */ }
   }
 }

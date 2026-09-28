@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { authorizeAgentSessionRequest } from "@/lib/tenant-agent-runtime";
+import { TenantAuthenticationError } from "@/lib/tenant-auth";
 
 export async function GET(
   req: Request,
@@ -28,6 +30,7 @@ export async function GET(
     }
 
     const sm = liveRpc?.inner.sessionManager ?? SessionManager.open(filePath!);
+    authorizeAgentSessionRequest(req, id, liveRpc?.cwd ?? sm.getCwd());
     // `before` is the oldest entry already on the client; fetch its ancestors
     // only (excludeLeaf) so prepending the page does not duplicate `before`.
     const context = buildSessionContext(sm.getEntries() as never, before ?? leafId, {
@@ -40,6 +43,7 @@ export async function GET(
 
     return NextResponse.json({ context, tail, before: before ?? null });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: String(error) }, { status });
   }
 }

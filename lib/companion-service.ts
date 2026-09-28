@@ -1,8 +1,10 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { resolveSessionPath } from "./session-reader";
+import { sessionPathKey } from "./session-path";
 import { getRpcSession, startRpcSession, type AgentEvent, type AgentSessionWrapper } from "./rpc-manager";
+import { resolveCompanionModel } from "./companion-model";
 import {
   buildCompanionSystemPrompt,
   CompanionRuntime,
@@ -121,19 +123,29 @@ export async function getCompanionSession(auth: CompanionAuth): Promise<AgentSes
       ? store.getCompanionConfigVersion(auth.tenant.id, existingAssignment.configVersionId)
       : store.ensureCompanionConfig(context);
     if (!config) throw new Error("Published companion config not found");
-    const exactSystemPrompt = () => buildCompanionSystemPrompt(config, new Date().toISOString());
+    const file = existingAssignment ? await resolveSessionPath(existingAssignment.sessionId) : null;
     if (existingAssignment) {
       const live = getRpcSession(existingAssignment.sessionId);
-      if (live?.isAlive()) return live;
-      const file = await resolveSessionPath(existingAssignment.sessionId);
-      const started = await startRpcSession(existingAssignment.sessionId, file ?? "", companionCwd(auth), {
-        toolNames: [], tenantIsolated: true, initialModel: { provider: config.modelProvider, modelId: config.modelId },
-        thinkingLevel: config.thinkingLevel as never, exactSystemPrompt,
-      });
+      if (live?.isAlive() && file && live.sessionFile && sessionPathKey(live.sessionFile) === sessionPathKey(file)) return live;
+      if (live?.isAlive()) live.destroy();
+    }
+    const model = await resolveCompanionModel(await ModelRuntime.create(), config.modelProvider, config.modelId);
+    const exactSystemPrompt = () => buildCompanionSystemPrompt(config, new Date().toISOString());
+    if (existingAssignment) {
+      const started = file
+        ? await startRpcSession(existingAssignment.sessionId, file, companionCwd(auth), {
+            toolNames: [], tenantIsolated: true, initialModel: { provider: model.provider, modelId: model.id },
+            thinkingLevel: config.thinkingLevel as never, exactSystemPrompt,
+          })
+        : await startRpcSession("", "", companionCwd(auth), {
+            toolNames: [], tenantIsolated: true, initialModel: { provider: model.provider, modelId: model.id },
+            thinkingLevel: config.thinkingLevel as never, exactSystemPrompt,
+          });
+      if (!file) store.repairCompanionAssignmentSession(context, existingAssignment.sessionId, started.realSessionId);
       return started.session;
     }
     const started = await startRpcSession("", "", companionCwd(auth), {
-      toolNames: [], tenantIsolated: true, initialModel: { provider: config.modelProvider, modelId: config.modelId },
+      toolNames: [], tenantIsolated: true, initialModel: { provider: model.provider, modelId: model.id },
       thinkingLevel: config.thinkingLevel as never, exactSystemPrompt,
     });
     store.ensureCompanionAssignment(context, started.realSessionId);

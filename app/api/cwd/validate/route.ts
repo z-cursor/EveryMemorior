@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { statSync, type Stats } from "fs";
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
-import { allowFileRoot } from "@/lib/file-access";
+import { allowFileRoot, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { resolveProject } from "@/lib/worktree";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
+import { canAccessWorkspacePath, tenantManagedWorkspaceRoot, workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
 
 function normalizeCwd(cwd: string): string {
   if (cwd === "~") return homedir();
@@ -16,6 +18,7 @@ function normalizeCwd(cwd: string): string {
 // Validates a candidate workspace before the UI selects it.
 export async function POST(req: Request) {
   try {
+    const session = requireTenantSession(req);
     const body = await req.json() as { cwd?: unknown };
     const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
 
@@ -23,7 +26,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Path is required" }, { status: 400 });
     }
 
-    const normalizedCwd = normalizeCwd(cwd);
+    const physicalCwd = workspacePathFromClient(session, cwd);
+    if (!physicalCwd) return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    const normalizedCwd = canManageHostConfiguration(session) ? normalizeCwd(physicalCwd) : physicalCwd;
+    if (!canManageHostConfiguration(session)
+      && !isFilePathAllowed(normalizedCwd, new Set([tenantManagedWorkspaceRoot(session)]))) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
     let stat: Stats;
     try {
       stat = statSync(normalizedCwd);
@@ -35,15 +44,21 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Path is not a directory: ${cwd}` }, { status: 400 });
     }
 
+    if (!canAccessWorkspacePath(session, normalizedCwd)) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
     allowFileRoot(normalizedCwd);
-    const project = await resolveProject(normalizedCwd);
+    const projectRoot = canManageHostConfiguration(session)
+      ? (await resolveProject(normalizedCwd)).projectRoot
+      : tenantManagedWorkspaceRoot(session);
     return NextResponse.json({
       success: true,
-      cwd: normalizedCwd,
-      projectRoot: project.projectRoot,
-      projectKey: projectIdentityKey(project.projectRoot),
+      cwd: workspacePathToClient(session, normalizedCwd),
+      projectRoot: workspacePathToClient(session, projectRoot),
+      projectKey: projectIdentityKey(workspacePathToClient(session, projectRoot) ?? ""),
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: workspaceErrorMessageForClient(req, error) }, { status: 500 });
   }
 }

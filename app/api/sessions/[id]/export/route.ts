@@ -7,6 +7,8 @@ import { promisify } from "util";
 import { fileURLToPath, pathToFileURL } from "url";
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
+import { authorizeAgentSessionFileRequest } from "@/lib/tenant-agent-runtime";
+import { canManageHostConfiguration, requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
 
 const execFileAsync = promisify(execFile);
 
@@ -242,6 +244,9 @@ export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  if (!canManageHostConfiguration(requireTenantSession(req))) {
+    return NextResponse.json({ error: "Tenant session export is unavailable until virtual-path redaction is supported" }, { status: 403 });
+  }
   const { id } = await params;
   const inline = new URL(req.url).searchParams.get("inline") === "1";
 
@@ -250,6 +255,7 @@ export async function GET(
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
+    authorizeAgentSessionFileRequest(req, id, filePath);
 
     const tempDir = join(tmpdir(), "pi-web-export");
     mkdirSync(tempDir, { recursive: true });
@@ -277,6 +283,7 @@ export async function GET(
       rmSync(outputPath, { force: true });
     }
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: String(error) }, { status });
   }
 }

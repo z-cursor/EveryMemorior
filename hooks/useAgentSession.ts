@@ -14,10 +14,11 @@ import type {
 } from "@/lib/types";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { AgentCommandError, isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { clearDraft, rekeyDraft, restoreDraftSubmission } from "@/lib/draft-store";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { getPresetFromToolNames, getToolNamesForPreset, type ToolEntry, type ToolPreset } from "@/lib/tool-presets";
+import { TENANT_WORK_TOOL_NAMES } from "@/lib/tenant-tool-policy";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
 import { userMessageKey } from "@/lib/prompt-recovery";
@@ -142,6 +143,7 @@ export type BuiltinSlashCommandResult =
 
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
+  tenantWorkspaceOnly?: boolean;
   sessionRunning?: boolean;
   newSessionCwd: string | null;
   newSessionDraftKey: string | null;
@@ -149,6 +151,8 @@ export interface UseAgentSessionOptions {
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey: string) => void;
   onSessionForked?: (newSessionId: string) => void;
+  /** Called when the selected session is no longer accessible to the account. */
+  onSessionAccessLost?: () => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
@@ -277,7 +281,7 @@ type SlashCommandsResponse = {
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
+    onSessionAccessLost, modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
   } = opts;
 
   const isNew = session === null && newSessionCwd !== null;
@@ -387,8 +391,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   useLayoutEffect(() => {
     if (!existingSessionId && (!isNew || sessionIdRef.current)) return;
-    setToolPresetState(getPreferredToolPreset());
-  }, [existingSessionId, isNew, setToolPresetState]);
+    if (opts.tenantWorkspaceOnly) setToolPresetState("none");
+    else setToolPresetState(getPreferredToolPreset());
+  }, [existingSessionId, isNew, opts.tenantWorkspaceOnly, setToolPresetState]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const container = scrollContainerRef.current;
@@ -473,6 +478,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (showLoading) setLoading(true);
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
+      if (res.status === 403) {
+        onSessionAccessLost?.();
+        return null;
+      }
       if (res.status === 404) {
         if (showLoading) {
           setData(null);
@@ -485,7 +494,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         return null;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let detail = "";
+        try {
+          const payload = await res.json() as { error?: unknown };
+          if (typeof payload.error === "string") detail = payload.error;
+        } catch {
+          // Keep the status when the server did not return JSON.
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
       const d = await res.json() as SessionData;
       if (sessionIdRef.current !== sid) return null;
       const persistedMessages = d.context.messages;
@@ -535,7 +553,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [setToolPresetState, syncLiveModel]);
+  }, [onSessionAccessLost, setToolPresetState, syncLiveModel]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, before?: string | null, options?: { tail?: number; signal?: AbortSignal }) => {
     try {
@@ -547,7 +565,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (options?.tail) params.set("tail", String(options.tail));
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const res = await fetch(url, { signal: options?.signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (res.status === 403 || res.status === 404) {
+        onSessionAccessLost?.();
+        return;
+      }
+      if (!res.ok) {
+        let detail = "";
+        try {
+          const payload = await res.json() as { error?: unknown };
+          if (typeof payload.error === "string") detail = payload.error;
+        } catch {
+          // Keep the status when the server did not return JSON.
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
       const d = await res.json() as { context: SessionData["context"] };
       if (sessionIdRef.current !== sid || options?.signal?.aborted || !sessionHookMountedRef.current) return;
       setHistoryCursor(d.context.oldestEntryId);
@@ -575,7 +606,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       if (!options?.signal?.aborted) console.error("Failed to load context:", e);
     }
-  }, []);
+  }, [onSessionAccessLost]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {
@@ -586,10 +617,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       onSystemToolsChange?.(tools);
       return tools;
     } catch (e) {
+      if (e instanceof AgentCommandError && e.status === 403) onSessionAccessLost?.();
       console.error("Failed to load tools:", e);
       return null;
     }
-  }, [onSystemToolsChange, setToolPresetState]);
+  }, [onSessionAccessLost, onSystemToolsChange, setToolPresetState]);
 
   const promoteNewSession = useCallback((messageCount = 0, firstMessage = "(no messages)") => {
     const sid = sessionIdRef.current;
@@ -641,7 +673,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             : {}),
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let detail = "";
+        try {
+          const payload = await res.json() as { error?: unknown };
+          if (typeof payload.error === "string") detail = payload.error;
+        } catch {
+          // Keep the status when the server did not return JSON.
+        }
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
       const result = await res.json() as {
         sessionId: string;
         model?: SelectedModel | null;
@@ -733,11 +774,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     const sid = session?.id;
     if (!sid) return;
-    maintainEventsConnected(sid);
+    let cancelled = false;
+    // EventSource does not expose HTTP status codes. Validate the selected
+    // session first so a stale cross-tenant URL becomes a normal session reset
+    // instead of an opaque SSE "closed" error followed by retry noise.
+    void fetch(`/api/sessions/${encodeURIComponent(sid)}?tail=1`, { cache: "no-store" })
+      .then((response) => {
+        if (cancelled) return;
+        if (response.status === 403 || response.status === 404) {
+          onSessionAccessLost?.();
+          return;
+        }
+        maintainEventsConnected(sid);
+      })
+      .catch(() => {
+        if (!cancelled) maintainEventsConnected(sid);
+      });
     return () => {
+      cancelled = true;
       if (sessionIdRef.current === sid) eventConnectionRef.current?.close();
     };
-  }, [maintainEventsConnected, session?.id]);
+  }, [maintainEventsConnected, onSessionAccessLost, session?.id]);
 
   useEffect(() => {
     const sid = session?.id;
@@ -1375,7 +1432,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
-    const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !opts.tenantWorkspaceOnly && !images?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
@@ -1483,7 +1540,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission, opts.tenantWorkspaceOnly]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1892,7 +1949,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [isNew]);
 
   const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
-    const toolNames = getToolNamesForPreset(preset);
+    const toolNames = opts.tenantWorkspaceOnly && preset !== "none" && preset !== "read-only"
+      ? [...TENANT_WORK_TOOL_NAMES]
+      : getToolNamesForPreset(preset);
     setPreferredToolPreset(preset);
     setToolPresetState(preset);
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
@@ -1920,9 +1979,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         syncLiveModel(state);
       }
     } catch (e) {
+      if (e instanceof AgentCommandError && e.status === 403) onSessionAccessLost?.();
       console.error("Failed to set tools:", e);
     }
-  }, [cancelEventStreamGrace, closeEvents, loadTools, maintainEventsConnected, setToolPresetState, syncLiveModel]);
+  }, [cancelEventStreamGrace, closeEvents, loadTools, maintainEventsConnected, onSessionAccessLost, opts.tenantWorkspaceOnly, setToolPresetState, syncLiveModel]);
 
   const scrollToMessage = useCallback((element: HTMLElement, viewportOffset = 16) => {
     const container = scrollContainerRef.current;

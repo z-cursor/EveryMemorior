@@ -30,11 +30,11 @@ function formatRelativeTime(value: string, locale: string): string {
 }
 
 function statusColor(status: SubagentSessionStatus): string {
-  if (status === "running" || status === "starting") return "var(--accent)";
-  if (status === "completed") return "#16a34a";
-  if (status === "failed") return "#dc2626";
-  if (status === "aborted") return "#d97706";
-  return "var(--text-dim)";
+  if (status === "running" || status === "starting") return "var(--action-primary)";
+  if (status === "completed") return "var(--status-success-text)";
+  if (status === "failed") return "var(--status-danger-strong)";
+  if (status === "aborted") return "var(--status-warning-text)";
+  return "var(--content-tertiary)";
 }
 
 function StatusIcon({ status }: { status: SubagentSessionStatus }) {
@@ -101,9 +101,9 @@ function AgentRow({
         gridTemplateColumns: "28px minmax(0, 1fr) auto",
         alignItems: "center",
         gap: 9,
-        padding: "7px 12px",
+        padding: "7px var(--space-3)",
         border: "none",
-        borderBottom: "1px solid var(--border)",
+        borderBottom: "var(--border-width) solid var(--border)",
         borderLeft: selected ? "2px solid var(--accent)" : "2px solid transparent",
         background: selected ? "var(--bg-selected)" : "transparent",
         color: "var(--text)",
@@ -129,14 +129,14 @@ function AgentRow({
         )}
       </span>
       <span style={{ minWidth: 0 }}>
-        <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: selected ? 600 : 500 }} title={primary}>
+        <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "var(--font-size-control)", fontWeight: selected ? 600 : 500 }} title={primary}>
           {primary}
         </span>
-        <span style={{ display: "block", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 11 }} title={secondary}>
+        <span style={{ display: "block", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: "var(--font-size-meta)" }} title={secondary}>
           {secondary}
         </span>
       </span>
-      <span style={{ display: "flex", alignItems: "center", gap: 6, color: main && !running ? "var(--text-dim)" : statusColor(status), fontSize: 11, whiteSpace: "nowrap" }}>
+      <span style={{ display: "flex", alignItems: "center", gap: "var(--space-1-5)", color: main && !running ? "var(--text-dim)" : statusColor(status), fontSize: "var(--font-size-meta)", whiteSpace: "nowrap" }}>
         {main && !running ? (
           selected ? t("agentSwitcher.current") : null
         ) : (
@@ -175,28 +175,28 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
       aria-label={t("agentSwitcher.title")}
       style={{
         background: "var(--bg-panel)",
-        borderLeft: "1px solid var(--border)",
-        borderRight: "1px solid var(--border)",
-        borderBottom: "1px solid var(--border)",
+        borderLeft: "var(--border-width) solid var(--border)",
+        borderRight: "var(--border-width) solid var(--border)",
+        borderBottom: "var(--border-width) solid var(--border)",
         borderRadius: "0 0 6px 6px",
         boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
         overflow: "hidden",
       }}
     >
       <div>
-        <div style={{ minHeight: 44, display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", borderBottom: "1px solid var(--border)" }}>
-          <strong style={{ fontSize: 12, fontWeight: 600 }}>{t("agentSwitcher.title")}</strong>
-          <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+        <div style={{ minHeight: 44, display: "flex", alignItems: "center", gap: "var(--space-2)", padding: "7px var(--space-3)", borderBottom: "var(--border-width) solid var(--border)" }}>
+          <strong style={{ fontSize: "var(--font-size-control)", fontWeight: 600 }}>{t("agentSwitcher.title")}</strong>
+          <span style={{ color: "var(--text-dim)", fontSize: "var(--font-size-meta)" }}>
             {t("agentSwitcher.count", { count: subagents.length })}
           </span>
           {runningCount > 0 && (
-            <span style={{ marginLeft: "auto", color: "var(--accent)", fontSize: 11 }}>
+            <span style={{ marginLeft: "auto", color: "var(--accent)", fontSize: "var(--font-size-meta)" }}>
               {t("agentSwitcher.runningCount", { count: runningCount })}
             </span>
           )}
         </div>
         {subagents.length > 8 && (
-          <div style={{ padding: 8, borderBottom: "1px solid var(--border)" }}>
+          <div style={{ padding: 8, borderBottom: "var(--border-width) solid var(--border)" }}>
             <input
               type="search"
               value={query}
@@ -204,9 +204,9 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
               placeholder={t("agentSwitcher.search")}
               aria-label={t("agentSwitcher.search")}
               style={{
-                width: "100%", height: 32, padding: "0 10px",
-                border: "1px solid var(--border)", borderRadius: 6,
-                background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none",
+                width: "100%", height: 32, padding: "0 var(--space-2-5)",
+                border: "var(--border-width) solid var(--border)", borderRadius: "var(--radius-control)",
+                background: "var(--bg)", color: "var(--text)", fontSize: "var(--font-size-control)", outline: "none",
               }}
             />
           </div>
@@ -229,7 +229,7 @@ export function AgentSessionPanel({ rootSession, subagents, selectedSessionId, r
             />
           ))}
           {visibleSubagents.length === 0 && (
-            <div style={{ padding: "22px 12px", color: "var(--text-dim)", fontSize: 12, textAlign: "center" }}>
+            <div style={{ padding: "22px var(--space-3)", color: "var(--text-dim)", fontSize: "var(--font-size-control)", textAlign: "center" }}>
               {t("agentSwitcher.noMatches")}
             </div>
           )}

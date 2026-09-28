@@ -18,19 +18,31 @@ export function parseUploadConflictStrategy(value: string | null): UploadConflic
     : null;
 }
 
+/**
+ * Return the canonical relative path carried by a browser directory upload.
+ * Upload paths are relative to the selected workspace directory; absolute
+ * paths, traversal segments, and empty segments are never accepted.
+ */
+export function normalizeUploadFilePath(filePath: string): string | null {
+  if (!filePath || filePath.startsWith("/") || filePath.includes("\\") || /^[a-zA-Z]:/.test(filePath)) {
+    return null;
+  }
+  const parts = filePath.split("/");
+  if (parts.some((part) => !part || part === "." || part === ".." || part.includes("\0") || part.includes(":"))) return null;
+  return parts.join("/");
+}
+
 export function validateUploadFileNames(fileNames: string[]): string | null {
   if (fileNames.length === 0) return "No files selected";
 
   const seen = new Set<string>();
   for (const fileName of fileNames) {
-    if (!fileName || fileName === "." || fileName === ".." || fileName.includes("\0")) {
+    const normalized = normalizeUploadFilePath(fileName);
+    if (!normalized) {
       return `Invalid file name: ${fileName || "(empty)"}`;
     }
-    if (fileName.includes("/") || fileName.includes("\\") || path.basename(fileName) !== fileName) {
-      return `File names must not contain a path: ${fileName}`;
-    }
-    if (seen.has(fileName)) return `Duplicate file name in upload: ${fileName}`;
-    seen.add(fileName);
+    if (seen.has(normalized)) return `Duplicate file name in upload: ${fileName}`;
+    seen.add(normalized);
   }
 
   return null;
@@ -41,7 +53,7 @@ export function inspectUploadTargets(directory: string, fileNames: string[]): Up
   const nonReplaceable: string[] = [];
 
   for (const fileName of fileNames) {
-    const destination = path.join(directory, fileName);
+    const destination = path.join(directory, ...fileName.split("/"));
     let stat: fs.Stats;
     try {
       stat = fs.lstatSync(destination);

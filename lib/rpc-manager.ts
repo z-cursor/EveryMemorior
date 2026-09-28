@@ -19,6 +19,8 @@ import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { notifySessionComplete } from "./web-push";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import { createTenantReadTools } from "./tenant-read-tools";
+import { isTenantWorkspaceToolSelection } from "./tenant-tool-policy";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type {
   ExtensionUiRequest,
@@ -48,6 +50,9 @@ import {
   readSessionToolSelection,
   validateSessionToolSelection,
 } from "./session-tool-selection";
+import { closeAgentSandbox } from "./tenant-agent-runtime";
+import { acquireModelAdmission } from "./model-admission";
+import { BIOGRAPHY_BOOK_ASSEMBLER_TOOL, createBiographyBookAssemblerExtension } from "./biography-book-assembler";
 
 // ============================================================================
 // Types
@@ -114,6 +119,7 @@ type ExtensionCommandContextActionsLike = {
 type AgentSessionWrapperOptions = {
   exactSystemPrompt?: () => string;
   chatOnly?: boolean;
+  tenantIsolated?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
 };
@@ -161,6 +167,12 @@ const COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT = new Set([
 
 export interface RpcSessionStartOptions {
   toolNames?: string[];
+  /** Reuse a known session id when recovering an unpersisted tenant session. */
+  initialSessionId?: string;
+  tenantIsolated?: boolean;
+  tenantSkillPaths?: string[];
+  tenantWorkspaceRoot?: string;
+  exactSystemPrompt?: () => string;
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -201,7 +213,10 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
   if (toolNames.length === 0) return [];
 
   const codingToolNames = new Set(CODING_TOOL_NAMES);
-  const selectedToolNames = resolveShellTools(toolNames, session.settingsManager.getDefaultTools());
+  // Tenant sessions always expose the Docker-backed bash tool. A host
+  // PowerShell selection would otherwise bypass the sandbox on Windows.
+  const selectedToolNames = resolveShellTools(toolNames, session.settingsManager.getDefaultTools())
+    .map((name) => name === "powershell" ? "bash" : name);
   const extensionToolNames = session
     .getAllTools()
     .map((t) => t.name)
@@ -235,9 +250,10 @@ export class AgentSessionWrapper {
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
-  private exactContextMessages: PiAgentMessage[] | undefined;
   private readonly exactSystemPrompt?: () => string;
+  private exactContextMessages: PiAgentMessage[] | undefined;
   private readonly chatOnly: boolean;
+  private readonly tenantIsolated: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
   private unsubscribe: (() => void) | null = null;
@@ -254,6 +270,7 @@ export class AgentSessionWrapper {
   ) {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
+    this.tenantIsolated = options.tenantIsolated ?? false;
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.installExactSystemPromptContinuation();
@@ -290,6 +307,10 @@ export class AgentSessionWrapper {
 
   isChatOnly(): boolean {
     return this.chatOnly;
+  }
+
+  isTenantIsolated(): boolean {
+    return this.tenantIsolated;
   }
 
   hasSuppressedCompletionNotifications(): boolean {
@@ -421,6 +442,27 @@ export class AgentSessionWrapper {
   private applyExactSystemPrompt(): void {
     if (!this.exactSystemPrompt || !this.inner.agent.state) return;
     this.inner.agent.state.systemPrompt = this.exactSystemPrompt();
+  }
+
+  /**
+   * Pi's next-turn hook only runs after the first assistant turn. Companion
+   * context must therefore replace the in-memory transcript before the first
+   * prompt as well; the session manager remains the durable source of truth.
+   */
+  private installExactInitialContext(): (() => void) | null {
+    const messages = this.exactContextMessages;
+    const state = this.inner.agent.state as (typeof this.inner.agent.state & { messages?: PiAgentMessage[] }) | undefined;
+    if (!messages || !state || !Array.isArray(state.messages) || messages.length === 0) return null;
+    const previous = state.messages;
+    state.messages = messages.slice(0, -1);
+    return () => {
+      try {
+        state.messages = this.inner.sessionManager.buildSessionContext().messages;
+      } catch {
+        state.messages = previous;
+      }
+      this.exactContextMessages = undefined;
+    };
   }
 
   private installExactSystemPromptContinuation(): void {
@@ -627,7 +669,10 @@ export class AgentSessionWrapper {
 
           this.pendingPromptCount += 1;
           let prompt: Promise<void>;
+          let releaseModelAdmission: (() => void) | null = null;
+          const restoreExactContext = this.installExactInitialContext();
           try {
+            releaseModelAdmission = await acquireModelAdmission();
             prompt = this.inner.prompt(command.message as string, {
               ...(promptImages?.length ? { images: promptImages } : {}),
               ...(streamingBehavior ? { streamingBehavior } : {}),
@@ -642,6 +687,8 @@ export class AgentSessionWrapper {
               },
             });
           } catch (error) {
+            restoreExactContext?.();
+            releaseModelAdmission?.();
             finishPrompt();
             throw error;
           }
@@ -665,6 +712,10 @@ export class AgentSessionWrapper {
               });
               if (!streamingBehavior) this.emit({ type: "prompt_done" });
             }
+          }).finally(() => {
+            releaseModelAdmission?.();
+            releaseModelAdmission = null;
+            restoreExactContext?.();
           }).catch((error) => {
             console.error(
               "[pi-web] prompt completion handler failed:",
@@ -999,6 +1050,7 @@ export class AgentSessionWrapper {
           {
             excludeFromContext: command.excludeFromContext as boolean | undefined,
             operations: createProjectCommandBashOperations({
+              agentSessionId: this.sessionId,
               shellPath: this.inner.settingsManager.getShellPath(),
             }),
           },
@@ -1032,6 +1084,9 @@ export class AgentSessionWrapper {
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     if (this.inner.isBashRunning) this.inner.abortBash();
+    void closeAgentSandbox(this.sessionId).catch((error) => {
+      console.error("[pi-web] failed to close Agent sandbox:", error);
+    });
     this.unsubscribe?.();
     for (const pending of this.pendingUiResponses.values()) pending.cancel();
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
@@ -1776,6 +1831,7 @@ export async function setRpcSessionTools(
   sessionId: string,
   sessionFile: string | undefined,
   requestedToolNames: unknown,
+  startOptions: RpcSessionStartOptions = {},
 ): Promise<SetRpcSessionToolsResult> {
   const toolNames = validateSessionToolSelection(requestedToolNames);
   const existing = getRpcSession(sessionId);
@@ -1788,7 +1844,7 @@ export async function setRpcSessionTools(
     }
     appendSessionToolSelection(manager, toolNames);
     invalidateSessionListCache();
-    const started = await startRpcSession(sessionId, sessionFile, undefined);
+    const started = await startRpcSession(sessionId, sessionFile, undefined, { ...startOptions, toolNames });
     return { session: started.session, sessionId: started.realSessionId, recreated: false };
   }
 
@@ -1818,12 +1874,13 @@ export async function setRpcSessionTools(
   await existing.shutdown();
 
   if (persistedFile) {
-    const started = await startRpcSession(sessionId, persistedFile, undefined);
+    const started = await startRpcSession(sessionId, persistedFile, undefined, { ...startOptions, toolNames });
     return { session: started.session, sessionId: started.realSessionId, recreated: true };
   }
 
   const started = await startRpcSession(`__recreate__${randomUUID()}`, "", sessionCwd, {
     toolNames,
+    ...startOptions,
     ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
     allowInitialModelFallback: true,
     ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
@@ -1953,6 +2010,19 @@ export function getCompletionNotificationSuppressedRpcSessionIds(): string[] {
  * thinking pin, and SDK scopedModels share one settings snapshot.
  * Pass options.toolNames to pre-configure active tools (empty = all disabled).
  */
+export function isPersistedChatOnlySession(sessionFile: string): boolean {
+  const entries = SessionManager.open(sessionFile, undefined).getEntries() as unknown as SessionEntry[];
+  return readSessionToolSelection(entries)?.length === 0
+    && !readSubagentSessionResources(entries);
+}
+
+export function isPersistedTenantSession(sessionFile: string): boolean {
+  const entries = SessionManager.open(sessionFile, undefined).getEntries() as unknown as SessionEntry[];
+  const selection = readSessionToolSelection(entries);
+  return !readSubagentSessionResources(entries)
+    && (selection?.length === 0 || (selection !== undefined && isTenantWorkspaceToolSelection(selection)));
+}
+
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
@@ -1977,7 +2047,9 @@ export async function startRpcSession(
     sessionManager = SessionManager.open(sessionFile, undefined);
   } else {
     if (!cwd) throw new Error("cwd is required for a new session");
-    sessionManager = SessionManager.create(cwd, undefined);
+    sessionManager = SessionManager.create(cwd, undefined, options.initialSessionId
+      ? { id: options.initialSessionId }
+      : undefined);
   }
   const sessionCwd = sessionManager.getCwd();
   const subagentResources = sessionFile
@@ -2013,7 +2085,11 @@ export async function startRpcSession(
       // tool registry — so they were unavailable in Pi Web sessions even though the
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
-      toolsOption = selectedToolNames.length === 0 ? [] : undefined;
+      toolsOption = selectedToolNames.length === 0
+        ? options.tenantIsolated && options.tenantWorkspaceRoot
+          ? [BIOGRAPHY_BOOK_ASSEMBLER_TOOL]
+          : []
+        : undefined;
     }
 
     // Build services first so extension-registered providers are available
@@ -2047,9 +2123,38 @@ export async function startRpcSession(
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
           }
-        : chatOnly
-          ? CHAT_ONLY_RESOURCE_LOADER_OPTIONS
+        : options.tenantIsolated
+          ? {
+              ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
+              noContextFiles: true,
+              noSkills: false,
+              additionalSkillPaths: options.tenantSkillPaths ?? [],
+              ...(options.tenantWorkspaceRoot
+                ? {
+                    extensionFactories: [createBiographyBookAssemblerExtension({
+                      workspaceRoot: options.tenantWorkspaceRoot,
+                      skillPaths: options.tenantSkillPaths,
+                    })],
+                  }
+                : {}),
+              skillsOverride: (base) => ({
+                skills: base.skills.filter((skill) =>
+                  options.tenantSkillPaths?.some((path) => skill.filePath.startsWith(path))
+                  || ["tavily-search", "ponytail"].includes(skill.name.toLowerCase().split(":").at(-1) ?? ""),
+                ),
+                diagnostics: base.diagnostics,
+              }),
+          }
+          : chatOnly
+            ? options.tenantSkillPaths?.length
+              ? {
+                  ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
+                  noSkills: false,
+                  additionalSkillPaths: options.tenantSkillPaths,
+                }
+              : CHAT_ONLY_RESOURCE_LOADER_OPTIONS
         : {
+            additionalSkillPaths: options.tenantSkillPaths ?? [],
             extensionFactories: [
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
@@ -2102,10 +2207,15 @@ export async function startRpcSession(
       ...(initial?.thinkingLevel ? { thinkingLevel: initial.thinkingLevel } : {}),
       ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
+      ...(options.tenantIsolated && options.tenantWorkspaceRoot && selectedToolNames?.length
+        ? { customTools: createTenantReadTools(options.tenantWorkspaceRoot) }
+        : {}),
       ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
     });
 
-    const persistedPreferences = await persistExplicitStartupPreferences(
+    const persistedPreferences = options.tenantIsolated
+      ? { modelDefaultChanged: false }
+      : await persistExplicitStartupPreferences(
       services.settingsManager,
       {
         ...(effectiveInitialModel ? { model: effectiveInitialModel } : {}),
@@ -2128,16 +2238,17 @@ export async function startRpcSession(
       inner.setActiveToolsByName(withExtensionTools(inner, selectedToolNames ?? inner.getActiveToolNames()));
     }
 
-    const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
+    const exactSystemPrompt = options.exactSystemPrompt ?? (subagentResources?.exactSystemPrompt !== undefined
       ? () => subagentResources.exactSystemPrompt!
       : chatOnly
         ? subagentResources
           ? () => subagentResources.appendSystemPrompt[0] ?? ""
           : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
-        : undefined;
+        : undefined);
     const wrapper = new AgentSessionWrapper(inner, {
       exactSystemPrompt,
       chatOnly,
+      tenantIsolated: options.tenantIsolated,
       onAgentRunComplete: (completedSessionId) => {
         void notifySessionComplete(completedSessionId).catch((error) => {
           console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);

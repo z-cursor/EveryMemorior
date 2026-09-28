@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
-import { getTerminalCwd, killTerminal, resizeTerminal, writeTerminal } from "@/lib/terminal-manager";
+import { getTerminalCwd, getTerminalTenantId, killTerminal, resizeTerminal, writeTerminal } from "@/lib/terminal-manager";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+function ownsTerminal(request: Request, id: string): boolean {
+  const session = requireTenantSession(request);
+  return canManageHostConfiguration(session) && getTerminalTenantId(id) === session.tenant.id;
+}
+
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  if (!ownsTerminal(req, id)) return NextResponse.json({ error: "Terminal not found" }, { status: 404 });
   const cwd = getTerminalCwd(id);
   return cwd
     ? NextResponse.json({ id, cwd })
@@ -18,6 +25,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
+    if (!ownsTerminal(req, id)) return NextResponse.json({ error: "Terminal not found" }, { status: 404 });
     const body = await req.json() as { type?: unknown; data?: unknown; cols?: unknown; rows?: unknown };
     if (body.type === "input" && typeof body.data === "string" && body.data.length <= 64 * 1024) {
       return writeTerminal(id, body.data)
@@ -38,10 +46,11 @@ export async function POST(
 }
 
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  if (!ownsTerminal(req, id)) return NextResponse.json({ error: "Terminal not found" }, { status: 404 });
   killTerminal(id);
   return NextResponse.json({ success: true });
 }

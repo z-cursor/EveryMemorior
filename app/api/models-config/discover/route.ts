@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { hasHostConfigurationAccess } from "@/lib/tenant-auth";
 import { resolveModelDiscoveryAuth } from "@/lib/model-discovery-auth";
 import { buildModelsListUrl, parseDiscoveredModels } from "@/lib/model-discovery";
 
@@ -31,6 +32,7 @@ function buildHeaders(api: string, apiKey: string | undefined, configured: Recor
 }
 
 export async function POST(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Model discovery is unavailable to this account" }, { status: 403 });
   try {
     const body = await req.json() as { providerName?: unknown; provider?: unknown };
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";

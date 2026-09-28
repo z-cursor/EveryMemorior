@@ -2,10 +2,12 @@ import { NextResponse } from "next/server";
 import type { PluginScope } from "@/lib/api-types";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { checkPluginUpdates } from "@/lib/plugin-updates";
+import { hasHostConfigurationAccess } from "@/lib/tenant-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Plugin checks are unavailable to this account" }, { status: 403 });
   try {
     const body = await req.json() as {
       cwd?: unknown;

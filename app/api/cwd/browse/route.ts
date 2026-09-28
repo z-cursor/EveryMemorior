@@ -8,13 +8,18 @@ import {
   resolveDirectory,
   shouldShowWindowsDrivePicker,
 } from "@/lib/directory-browser";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
+import { canAccessWorkspacePath, tenantManagedWorkspaceRoot, workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
+import { isFilePathAllowed } from "@/lib/file-access";
 
 // GET /api/cwd/browse?path=...：列出文件系统中的可读子目录。
 export async function GET(request: NextRequest) {
   try {
+    const session = requireTenantSession(request);
+    const hostAccess = canManageHostConfiguration(session);
     const requested = request.nextUrl.searchParams.get("path")?.trim();
 
-    if (shouldShowWindowsDrivePicker(requested)) {
+    if (hostAccess && shouldShowWindowsDrivePicker(requested)) {
       return NextResponse.json({
         path: "",
         parentPath: null,
@@ -23,7 +28,11 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const candidate = getBrowseStartDirectory(requested);
+    const candidate = hostAccess ? getBrowseStartDirectory(requested)
+      : workspacePathFromClient(session, requested || "/workspace");
+    if (!candidate || (!hostAccess && !isFilePathAllowed(candidate, new Set([tenantManagedWorkspaceRoot(session)])))) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
 
     let resolved: string;
     try {
@@ -36,15 +45,23 @@ export async function GET(request: NextRequest) {
     if (!directoryStat.isDirectory()) {
       return NextResponse.json({ error: "Path is not a directory" }, { status: 400 });
     }
+    if (!canAccessWorkspacePath(session, resolved)) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
 
-    const directories = await listDirectories(resolved);
+    const listed = await listDirectories(resolved);
+    const directories = hostAccess ? listed : listed.flatMap((entry) => {
+      const publicPath = workspacePathToClient(session, entry.path);
+      return publicPath ? [{ name: entry.name, path: publicPath }] : [];
+    });
 
     return NextResponse.json({
-      path: resolved,
-      parentPath: getParentDirectory(resolved),
+      path: workspacePathToClient(session, resolved),
+      parentPath: hostAccess ? getParentDirectory(resolved)
+        : resolved === tenantManagedWorkspaceRoot(session) ? null : workspacePathToClient(session, getParentDirectory(resolved)!),
       directories,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: workspaceErrorMessageForClient(request, error) }, { status: 500 });
   }
 }

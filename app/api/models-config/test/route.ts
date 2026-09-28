@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { hasHostConfigurationAccess } from "@/lib/tenant-auth";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -26,6 +27,7 @@ function getAssistantText(message: AssistantMessage): string {
 }
 
 export async function POST(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Model tests are unavailable to this account" }, { status: 403 });
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ ok: false, error: "Untrusted API request" }, { status: 403 });
   }

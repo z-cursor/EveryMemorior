@@ -22,6 +22,10 @@ import type { SessionEntry } from "@/lib/types";
 import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { jsonResponse } from "@/lib/json-response";
+import { authorizeAgentSessionRequest } from "@/lib/tenant-agent-runtime";
+import { canManageHostConfiguration, requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
+import { workspaceErrorMessageForClient, workspaceSessionInfoToClient } from "@/lib/tenant-workspace";
+import { getTenantStore } from "@/lib/tenant-store";
 
 export async function GET(
   req: Request,
@@ -37,6 +41,7 @@ export async function GET(
     }
 
     const sm = liveRpc?.inner.sessionManager ?? SessionManager.open(resolvedPath!);
+    authorizeAgentSessionRequest(req, id, liveRpc?.cwd ?? sm.getCwd());
     const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
     const entries = sm.getEntries();
     const leafId = sm.getLeafId();
@@ -99,8 +104,8 @@ export async function GET(
       req,
       {
         sessionId: id,
-        filePath,
-        info,
+        filePath: canManageHostConfiguration(requireTenantSession(req)) ? filePath : "",
+        info: info ? workspaceSessionInfoToClient(requireTenantSession(req), info) : null,
         leafId,
         tree,
         context,
@@ -110,7 +115,8 @@ export async function GET(
       },
     );
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: workspaceErrorMessageForClient(req, error) }, { status });
   }
 }
 
@@ -130,17 +136,19 @@ export async function PATCH(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
     const sm = SessionManager.open(filePath);
+    authorizeAgentSessionRequest(req, id, sm.getCwd());
     sm.appendSessionInfo(name.trim());
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: String(error) }, { status });
   }
 }
 
 // DELETE /api/sessions/[id]
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -149,6 +157,10 @@ export async function DELETE(
     if (!filePath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
+
+    const liveSession = getRpcSession(id);
+    const targetHeader = existsSync(filePath) ? readSessionHeader(filePath) : undefined;
+    authorizeAgentSessionRequest(req, id, liveSession?.cwd ?? targetHeader?.cwd);
 
     // Read only the bounded header before deleting.
     let parentSessionPath: string | undefined;
@@ -296,9 +308,12 @@ export async function DELETE(
       }
       invalidateSessionPathCache(deletedId);
     }
+    const tenantStore = getTenantStore();
+    for (const deletedId of deletedSessionIds) tenantStore.removeAgentSessionBinding(deletedId);
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: String(error) }, { status });
   }
 }

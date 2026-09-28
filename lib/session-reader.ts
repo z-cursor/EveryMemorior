@@ -2,7 +2,7 @@ import {
   SessionManager,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { closeSync, type Dirent, fstatSync, openSync, readSync } from "fs";
+import { closeSync, existsSync, type Dirent, fstatSync, openSync, readSync } from "fs";
 import { readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -13,6 +13,7 @@ import { sessionPathKey } from "./session-path";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
+import { readSessionToolSelection } from "./session-tool-selection";
 import { listSessionsIncremental } from "./session-list-scanner";
 
 export { getAgentDir };
@@ -154,6 +155,16 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
         subagent = readSubagentRun(readSessionRelationEntries(s.path), s.id, s.path);
       } catch { /* malformed or concurrently removed session */ }
     }
+    let chatOnly = false;
+    if (!subagent) {
+      try {
+        const entries = parseSessionEntries([
+          ...readBoundedLines(s.path, 128 * 1024, 8).slice(1),
+          ...readBoundedTailLines(s.path, 64 * 1024),
+        ]);
+        chatOnly = readSessionToolSelection(entries)?.length === 0;
+      } catch { /* the file may disappear during a concurrent scan */ }
+    }
     return {
       path: s.path,
       id: s.id,
@@ -163,6 +174,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       modified: s.modified.toISOString(),
       messageCount: s.messageCount,
       firstMessage: s.firstMessage || "(no messages)",
+      chatOnly,
       parentSessionId: originSessionId,
       ...(subagent
         ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
@@ -333,7 +345,12 @@ function getPathToIdCache(): Map<string, string> {
 
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
-  if (cached) return cached;
+  if (cached && existsSync(cached)) return cached;
+  if (cached) {
+    getPathCache().delete(sessionId);
+    const pathKey = sessionPathKey(cached);
+    if (getPathToIdCache().get(pathKey) === sessionId) getPathToIdCache().delete(pathKey);
+  }
 
   const targetedPath = await findSessionPathById(sessionId);
   if (targetedPath) {

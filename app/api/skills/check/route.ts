@@ -3,10 +3,12 @@ import type { SkillInstallScope } from "@/lib/api-types";
 import { checkSkillUpdates } from "@/lib/skill-updates";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { hasHostConfigurationAccess } from "@/lib/tenant-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Host Skill checks are unavailable to this account" }, { status: 403 });
   try {
     const body = await req.json() as {
       cwd?: unknown;

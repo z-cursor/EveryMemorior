@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { containsProhibitedCompanionProfileContent, containsSensitiveCompanionInformation, normalizedOrdinaryCompanionMemory, ordinaryCompanionTopics } from "./companion-memory-policy";
+import { containsProhibitedCompanionProfileContent, containsSensitiveCompanionInformation, normalizedOrdinaryCompanionMemory, ordinaryCompanionTopics, ORDINARY_COMPANION_TOPIC_LABELS } from "./companion-memory-policy";
 import { calculateCompanionTrialMetrics, passesCompanionTrialGate } from "./companion-quality";
 
 export const TENANT_SCHEMA_VERSION = 8;
@@ -1107,6 +1107,8 @@ function normalizedCompanionProfileValue(field: CompanionProfileFieldName, rawVa
   const value = requiredText(rawValue, "profile.value");
   if (containsProhibitedCompanionProfileContent(value)) throw new Error("Sensitive or prohibited information cannot be stored in the Companion Profile");
   if (field === "topics") {
+    const selected = value.split("、");
+    if (selected.every((topic) => ORDINARY_COMPANION_TOPIC_LABELS.includes(topic))) return value;
     const topics = ordinaryCompanionTopics(value);
     if (topics.length === 0) throw new Error("Profile topics must be an ordinary allowed topic");
     return topics.join("、");
@@ -1121,6 +1123,7 @@ function normalizedCompanionProfileValue(field: CompanionProfileFieldName, rawVa
   };
   const fieldChoices = choices[field];
   if (fieldChoices) {
+    if (fieldChoices.some(([, normalized]) => normalized === value)) return value;
     const normalized = fieldChoices.find(([pattern]) => pattern.test(value))?.[1];
     if (!normalized) throw new Error(`Invalid Companion Profile value for ${field}`);
     return normalized;
@@ -1554,6 +1557,35 @@ export class TenantStore {
     return row ? mapWorkspace(row) : null;
   }
 
+  listActiveWorkspaces(tenantId: string): Workspace[] {
+    const rows = this.database.prepare(`
+      SELECT id, tenant_id, slug, name, root_path, status, created_by_membership_id, created_at, updated_at
+      FROM workspaces WHERE tenant_id = ? AND status = 'active'
+      ORDER BY updated_at DESC
+    `).all(tenantId) as SqlRow[];
+    return rows.map(mapWorkspace);
+  }
+
+  listArchivedWorkspaces(tenantId: string): Workspace[] {
+    const rows = this.database.prepare(`
+      SELECT id, tenant_id, slug, name, root_path, status, created_by_membership_id, created_at, updated_at
+      FROM workspaces WHERE tenant_id = ? AND status = 'archived'
+    `).all(tenantId) as SqlRow[];
+    return rows.map(mapWorkspace);
+  }
+
+  renameWorkspace(context: TenantContext, workspaceId: string, name: string): Workspace {
+    const actor = this.requireActiveMembership(context);
+    const workspace = this.getWorkspace(context.tenantId, workspaceId);
+    if (!workspace || workspace.status !== "active") throw new Error("Workspace not found");
+    const now = new Date().toISOString();
+    this.database.prepare(`
+      UPDATE workspaces SET name = ?, updated_at = ? WHERE tenant_id = ? AND id = ?
+    `).run(requiredText(name, "workspace.name"), now, context.tenantId, workspaceId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "workspace.renamed", "workspace", workspaceId, now);
+    return this.getWorkspace(context.tenantId, workspaceId)!;
+  }
+
   listActiveWorkspaceRoots(tenantId: string): string[] {
     const rows = this.database.prepare(`
       SELECT root_path FROM workspaces
@@ -1603,6 +1635,10 @@ export class TenantStore {
     return row ? { ...mapBinding(row), workspacePath: asString(row, "root_path") } : null;
   }
 
+  removeAgentSessionBinding(agentSessionId: string): void {
+    this.database.prepare("DELETE FROM agent_session_bindings WHERE agent_session_id = ?").run(agentSessionId);
+  }
+
   createTenantSkillDraft(context: TenantContext, input: {
     slug: string; name: string; description: string; contentDigest: string;
     storagePath: string; manifest: Record<string, unknown>;
@@ -1636,6 +1672,14 @@ export class TenantStore {
       WHERE tenant_id = ? AND created_by_membership_id = ? AND status = 'published'
         AND version = (SELECT MAX(v.version) FROM tenant_skills v WHERE v.tenant_id = tenant_skills.tenant_id AND v.created_by_membership_id = tenant_skills.created_by_membership_id AND v.slug = tenant_skills.slug AND v.status = 'published')
       ORDER BY slug COLLATE NOCASE, version DESC`).all(tenantId, membershipId) as SqlRow[];
+    return rows.map((row) => asString(row, "storage_path"));
+  }
+
+  listPublishedTenantSkillPathsForTenant(tenantId: string): string[] {
+    const rows = this.database.prepare(`SELECT storage_path FROM tenant_skills
+      WHERE tenant_id = ? AND status = 'published'
+        AND version = (SELECT MAX(v.version) FROM tenant_skills v WHERE v.tenant_id = tenant_skills.tenant_id AND v.created_by_membership_id = tenant_skills.created_by_membership_id AND v.slug = tenant_skills.slug AND v.status = 'published')
+      ORDER BY slug COLLATE NOCASE, version DESC`).all(tenantId) as SqlRow[];
     return rows.map((row) => asString(row, "storage_path"));
   }
 
@@ -1801,6 +1845,20 @@ export class TenantStore {
       VALUES (?, ?, ?, ?, ?, ?)`).run(context.tenantId, membership.id, requiredText(sessionId, "sessionId"), config.id, now, now);
     this.insertAuditEvent(context.tenantId, membership.userId, membership.id, "companion.assignment.created", "companion_assignment", membership.id, now);
     return this.getCompanionAssignment(context)!;
+  }
+
+  repairCompanionAssignmentSession(context: TenantContext, previousSessionId: string, sessionId: string): CompanionAssignment {
+    const membership = this.requireActiveMembership(context);
+    const now = new Date().toISOString();
+    const result = this.database.prepare(`UPDATE companion_assignments SET session_id = ?, updated_at = ?
+      WHERE tenant_id = ? AND membership_id = ? AND session_id = ?`)
+      .run(requiredText(sessionId, "sessionId"), now, context.tenantId, membership.id, previousSessionId);
+    if (result.changes === 1) {
+      this.insertAuditEvent(context.tenantId, membership.userId, membership.id, "companion.assignment.session_repaired", "companion_assignment", membership.id, now);
+    }
+    const assignment = this.getCompanionAssignment(context);
+    if (!assignment) throw new Error("Companion assignment not found");
+    return assignment;
   }
 
   previewCompanionMigration(context: TenantContext, membershipId: string, configVersionId: string): {

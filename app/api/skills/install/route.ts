@@ -4,6 +4,7 @@ import { runNpx } from "@/lib/npx";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
+import { hasHostConfigurationAccess } from "@/lib/tenant-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ const ANSI_RE = /\x1B\[[0-9;]*m/g;
 
 // POST /api/skills/install  body: { package: string; scope: "global" | "project"; cwd?: string }
 export async function POST(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Host Skill installation is unavailable to this account" }, { status: 403 });
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }

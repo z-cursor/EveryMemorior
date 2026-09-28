@@ -27,7 +27,7 @@ test("offers a persisted built-in sub-agent switch with explicit session reload"
   assert.match(source, /reloadNeeded && sessionId/);
   assert.match(source, /className="agents-concurrency-control"[\s\S]*?t\("agents\.maxConcurrent"\)/);
   assert.equal((source.match(/className="agents-feature-setting"/g) ?? []).length, 1);
-  assert.match(cssSource, /\.agents-feature-setting \{[\s\S]*?border-bottom: 1px solid var\(--border\)/);
+  assert.match(cssSource, /\.agents-feature-setting \{[\s\S]*?border-bottom: var\(--border-width\) solid var\(--border\)/);
   assert.match(cssSource, /\.agents-concurrency-control \{[\s\S]*?white-space: nowrap;/);
 });
 

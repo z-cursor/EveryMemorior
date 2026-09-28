@@ -128,6 +128,20 @@ test("keeps streamed tool input out of collapsed markup while counting it", () =
   assert.equal(getTokenEstimateText(block), block.rawInput);
 });
 
+test("collapses large write content in the dialogue", () => {
+  const content = "x".repeat(30_000);
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-write-large",
+    toolName: "write",
+    input: { path: "index.html", content },
+  };
+  const rendered = getToolCallInputText(block);
+  assert.match(rendered, /index\.html/);
+  assert.match(rendered, /file content hidden from dialogue/);
+  assert.ok(!rendered.includes(content));
+});
+
 test("renders subagents as standard tool calls with only an extra session button", () => {
   const block = {
     type: "toolCall",
@@ -163,7 +177,7 @@ test("renders subagents as standard tool calls with only an extra session button
     onOpenSession() {},
   });
 
-  assert.match(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
+  assert.match(html, /border:var\(--border-width\) solid rgba\(34,197,94,0\.25\)/);
   assert.match(html, />Agent</);
   assert.match(html, />Explore</);
   assert.match(html, /aria-label="Open sub-agent session"/);

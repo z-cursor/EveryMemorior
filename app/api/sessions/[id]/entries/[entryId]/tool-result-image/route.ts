@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "@/lib/tool-result-images";
+import { authorizeAgentSessionFileRequest } from "@/lib/tenant-agent-runtime";
+import { TenantAuthenticationError } from "@/lib/tenant-auth";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -55,6 +57,7 @@ export async function GET(
   try {
     const filePath = await resolveSessionPath(id);
     if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    authorizeAgentSessionFileRequest(req, id, filePath);
 
     const entry = getSessionEntries(filePath).find((candidate) => candidate.id === entryId);
     if (!entry || entry.type !== "message" || entry.message.role !== "toolResult") {
@@ -81,6 +84,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: String(error) }, { status });
   }
 }

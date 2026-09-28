@@ -9,8 +9,11 @@ import {
   type ModelsData,
 } from "@/lib/models-cache";
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
-import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
+import { tenantManagedWorkspaceRoot, workspacePathFromClient } from "@/lib/tenant-workspace";
+import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS } from "@/lib/chat-only";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +28,7 @@ function compareModelEntries(
     || modelNameCollator.compare(a.id, b.id);
 }
 
-async function loadModels(cwd: string): Promise<ModelsData> {
+async function loadModels(cwd: string, tenantIsolated = false): Promise<ModelsData> {
   const nameMap = new Map<string, string>();
   let modelList: { id: string; name: string; provider: string }[] = [];
   let defaultModel: { provider: string; modelId: string } | null = null;
@@ -40,7 +43,8 @@ async function loadModels(cwd: string): Promise<ModelsData> {
   const services = await createAgentSessionServices({
     cwd,
     agentDir,
-    ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
+    ...(tenantIsolated ? { resourceLoaderOptions: { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, noContextFiles: true } } : {}),
+    ...(!tenantIsolated && trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
   });
   const modelError = services.modelRuntime.getError();
   const settings: SettingsManager = services.settingsManager;
@@ -99,25 +103,35 @@ const EMPTY_MODELS: ModelsData = {
 };
 
 export async function GET(req: Request) {
-  const requestedCwd = new URL(req.url).searchParams.get("cwd") || process.cwd();
-  const cwd = resolve(requestedCwd);
+  const auth = requireTenantSession(req);
+  const tenantRoots = canManageHostConfiguration(auth)
+    ? null : new Set([tenantManagedWorkspaceRoot(auth)]);
+  const requestedCwd = new URL(req.url).searchParams.get("cwd")
+    || (tenantRoots ? "/workspace" : process.cwd());
+  const physicalCwd = workspacePathFromClient(auth, requestedCwd);
+  if (!physicalCwd) return Response.json({ error: "Access denied" }, { status: 403 });
+  const cwd = resolve(physicalCwd);
+  if (tenantRoots && !isFilePathAllowed(cwd, tenantRoots)) {
+    return Response.json({ error: "Access denied" }, { status: 403 });
+  }
 
   let cwdStat;
   try {
     cwdStat = await stat(cwd);
   } catch {
-    return Response.json({ error: `Directory does not exist: ${cwd}` }, { status: 400 });
+    return Response.json({ error: `Directory does not exist: ${requestedCwd}` }, { status: 400 });
   }
   if (!cwdStat.isDirectory()) {
-    return Response.json({ error: `Not a directory: ${cwd}` }, { status: 400 });
+    return Response.json({ error: `Not a directory: ${requestedCwd}` }, { status: 400 });
   }
   const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
+  if (!isExistingFilePathAllowed(cwd, allowedRoots)
+    || (tenantRoots && !isExistingFilePathAllowed(cwd, tenantRoots))) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
   try {
-    return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
+    return Response.json(await loadModelsWithCache(tenantRoots ? `tenant:${cwd}` : cwd, () => loadModels(cwd, Boolean(tenantRoots))));
   } catch {
     return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }

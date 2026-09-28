@@ -9,6 +9,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { resolveCompanionModel } from "@/lib/companion-model";
 
 export const dynamic = "force-dynamic";
 
@@ -45,8 +46,11 @@ export async function POST(request: Request) {
     const context = { tenantId: auth.tenant.id, membershipId: auth.membership.id };
     const body = await request.json() as Record<string, unknown>;
     if (body.action === "draft") {
+      const modelProvider = String(body.modelProvider ?? "qwen");
+      const modelId = String(body.modelId ?? "FY-Qwen3.8-27B-NVFP4");
+      const model = await resolveCompanionModel(await ModelRuntime.create(), modelProvider, modelId);
       return NextResponse.json({ config: store.createCompanionConfigDraft(context, {
-        behaviorDocument: String(body.behaviorDocument ?? ""), modelProvider: String(body.modelProvider ?? "qwen"), modelId: String(body.modelId ?? "FY-Qwen3.8-27B-NVFP4"),
+        behaviorDocument: String(body.behaviorDocument ?? ""), modelProvider: model.provider, modelId: model.id,
         thinkingLevel: String(body.thinkingLevel ?? "off"), temperature: Number(body.temperature ?? 0.2), maxOutputTokens: Number(body.maxOutputTokens ?? 600),
       }) }, { status: 201 });
     }
@@ -89,13 +93,12 @@ export async function POST(request: Request) {
         : selectCompanionEvaluationCases(loadCompanionEvaluationBank(), suite, evaluationMode);
       const config = store.getCompanionConfigVersion(context.tenantId, body.configVersionId);
       if (!config) throw new Error("Companion config version not found");
+      const runtime = await ModelRuntime.create();
+      const model = await resolveCompanionModel(runtime, config.modelProvider, config.modelId);
       const graderPrompt = readFileSync(join(process.cwd(), "prompts", "grader.system.md"), "utf8");
       const dialogueGraderPrompt = readFileSync(join(process.cwd(), "prompts", "dialogue-grader.system.md"), "utf8");
       const policy = JSON.parse(readFileSync(join(process.cwd(), "evals", "evaluation-policy.json"), "utf8")) as Record<string, unknown>;
-      const graderVersion = createHash("sha256").update(JSON.stringify({ evaluator: COMPANION_EVALUATOR_VERSION, graderPrompt, dialogueGraderPrompt, policy, modelProvider: config.modelProvider, modelId: config.modelId })).digest("hex").slice(0, 16);
-      const runtime = await ModelRuntime.create();
-      const model = runtime.getModel(config.modelProvider, config.modelId);
-      if (!model) throw new Error(`Evaluation model ${config.modelProvider}/${config.modelId} is unavailable`);
+      const graderVersion = createHash("sha256").update(JSON.stringify({ evaluator: COMPANION_EVALUATOR_VERSION, graderPrompt, dialogueGraderPrompt, policy, modelProvider: model.provider, modelId: model.id })).digest("hex").slice(0, 16);
       const evaluation = await runCompanionEvaluation({
         cases: selected,
         candidateSystemPrompt: buildCompanionSystemPrompt(config, new Date().toISOString()),
@@ -121,7 +124,7 @@ export async function POST(request: Request) {
       candidate: config as unknown as Record<string, unknown>,
       questions: selected.map((item) => item.question), privateAnswers: selected.map((item) => item.privateAnswer),
       graderPrompt: JSON.stringify({ singleTurn: graderPrompt, dialogue: dialogueGraderPrompt }),
-      graderModel: `${config.modelProvider}/${config.modelId}`, parameters: { temperature: 0, thinking: false, structuredOutput: "strict-json-validation", evaluator: COMPANION_EVALUATOR_VERSION },
+      graderModel: `${model.provider}/${model.id}`, parameters: { temperature: 0, thinking: false, structuredOutput: "strict-json-validation", evaluator: COMPANION_EVALUATOR_VERSION },
       policy,
       itemCount: selected.length, averageScore: evaluation.averageScore, fatalCount: evaluation.fatalCount, results: evaluation.results, suggestions: evaluation.suggestions,
     }) });

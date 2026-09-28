@@ -8,19 +8,22 @@ import {
   resolveBashOutputPath,
 } from "@/lib/bash-output";
 import { isBashOutputPathReferencedBySession } from "@/lib/session-file-references";
+import { resolveSessionPath } from "@/lib/session-reader";
+import { authorizeAgentSessionFileRequest } from "@/lib/tenant-agent-runtime";
+import { canManageHostConfiguration, requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
 
 // GET /api/agent/[id]/bash-output?path=<absPath>
 // Reads a bash output temp file referenced by this session. Inline display is
 // size-limited; download responses stream the file without buffering it.
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   let path: string | null = null;
   let download = false;
   try {
-    const url = new URL(_req.url);
+    const url = new URL(req.url);
     path = url.searchParams.get("path");
     download = url.searchParams.get("download") === "1";
   } catch {
@@ -29,6 +32,18 @@ export async function GET(
 
   if (!path) {
     return NextResponse.json({ error: "path required" }, { status: 400 });
+  }
+
+  try {
+    if (!canManageHostConfiguration(requireTenantSession(req))) {
+      return NextResponse.json({ error: "Shell output is unavailable to tenant members" }, { status: 403 });
+    }
+    const sessionFile = await resolveSessionPath(id);
+    if (!sessionFile) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    authorizeAgentSessionFileRequest(req, id, sessionFile);
+  } catch (error) {
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status });
   }
 
   const resolved = resolveBashOutputPath(path, tmpdir());

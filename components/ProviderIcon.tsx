@@ -72,8 +72,8 @@ export function ProviderIcon({ id, size }: { id: string; size: number }) {
       style={{
         width: size,
         height: size,
-        border: "1px solid var(--border)",
-        borderRadius: 4,
+        border: "var(--border-width) solid var(--border)",
+        borderRadius: "var(--radius-sm)",
         color: "var(--text-dim)",
         display: "inline-flex",
         alignItems: "center",

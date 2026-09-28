@@ -16,6 +16,7 @@ const ORDINARY_TOPICS = [
   ["园艺手工", /(园艺|种花|养花|书法|画画|手工|编织)/u],
   ["棋牌益智", /(下棋|象棋|围棋|数独|拼图)/u],
 ] as const;
+export const ORDINARY_COMPANION_TOPIC_LABELS: readonly string[] = ORDINARY_TOPICS.map(([label]) => label);
 
 export function containsSensitiveCompanionInformation(value: string): boolean {
   return [HEALTH, MEDICATION, BEREAVEMENT, TRAUMA, ADDRESS, FINANCE, FAMILY_CONFLICT].some((pattern) => pattern.test(value));

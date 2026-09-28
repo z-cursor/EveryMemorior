@@ -214,7 +214,7 @@ export function ToolDefinitionsPanel({ loading, tools, translate }: Props) {
           min-height: 240px;
           overflow: hidden;
           background: var(--bg-panel);
-          border-bottom: 1px solid var(--border);
+          border-bottom: var(--border-width) solid var(--border);
         }
         .tool-definitions-sidebar,
         .tool-definition-detail {
@@ -224,7 +224,7 @@ export function ToolDefinitionsPanel({ loading, tools, translate }: Props) {
           flex-direction: column;
         }
         .tool-definitions-sidebar {
-          border-right: 1px solid var(--border);
+          border-right: var(--border-width) solid var(--border);
           background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg));
         }
         .tool-definitions-list,
@@ -240,7 +240,7 @@ export function ToolDefinitionsPanel({ loading, tools, translate }: Props) {
           align-items: center;
           padding: 8px 12px;
           border: none;
-          border-bottom: 1px solid var(--border);
+          border-bottom: var(--border-width) solid var(--border);
           background: transparent;
           color: var(--text-muted);
           cursor: pointer;
@@ -290,14 +290,14 @@ export function ToolDefinitionsPanel({ loading, tools, translate }: Props) {
           white-space: pre-wrap;
         }
         .tool-definition-fields {
-          border-top: 1px solid var(--border);
+          border-top: var(--border-width) solid var(--border);
         }
         .tool-definition-field {
           display: grid;
           grid-template-columns: minmax(88px, 0.75fr) minmax(0, 1.5fr);
           gap: 12px;
           padding: 9px 0;
-          border-bottom: 1px solid var(--border);
+          border-bottom: var(--border-width) solid var(--border);
           font-size: 11px;
           line-height: 1.45;
         }

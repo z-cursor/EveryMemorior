@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { hasHostConfigurationAccess } from "@/lib/tenant-auth";
 import {
   flattenModelsDevCatalog,
   recommendModelCatalogPreset,
@@ -60,6 +61,7 @@ async function loadCatalog(): Promise<ModelCatalogEntry[]> {
 }
 
 export async function GET(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Model catalog is unavailable to this account" }, { status: 403 });
   const { searchParams } = new URL(req.url);
   const query = (searchParams.get("q") ?? "").slice(0, 120);
   const provider = (searchParams.get("provider") ?? "").slice(0, 120);

@@ -18,6 +18,12 @@ function memberContext(request: Request) {
   };
 }
 
+function clientErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof TenantAuthenticationError) return error.message;
+  const message = error instanceof Error ? error.message : "";
+  return /\bENOENT\b|no such file or directory/i.test(message) ? fallback : message || fallback;
+}
+
 function companionUnderstandingState(request: Request) {
   const { context, store } = memberContext(request);
   return {
@@ -41,7 +47,7 @@ export async function GET(request: Request) {
     return NextResponse.json(companionUnderstandingState(request), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const status = error instanceof TenantAuthenticationError ? error.status : 400;
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to load companion understanding" }, { status });
+    return NextResponse.json({ error: clientErrorMessage(error, "无法读取长期记忆设置，请稍后重试。") }, { status });
   }
 }
 
@@ -118,6 +124,6 @@ export async function PATCH(request: Request) {
     }
   } catch (error) {
     const status = error instanceof TenantAuthenticationError ? error.status : 400;
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to update companion understanding" }, { status });
+    return NextResponse.json({ error: clientErrorMessage(error, "无法保存长期记忆设置，请稍后重试。") }, { status });
   }
 }

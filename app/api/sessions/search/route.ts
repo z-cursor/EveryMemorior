@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { listAllSessions } from "@/lib/session-reader";
 import { searchSessionContents } from "@/lib/session-search";
+import { tenantSessionsForRequest } from "@/lib/tenant-agent-runtime";
+import { requireTenantSession } from "@/lib/tenant-auth";
+import { workspaceErrorMessageForClient, workspaceSessionInfoToClient } from "@/lib/tenant-workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -12,9 +15,15 @@ export async function GET(request: Request) {
   }
   try {
     // Paths come only from the same catalog used by the sidebar.
-    const sessions = query && !request.signal.aborted ? await listAllSessions() : [];
-    return NextResponse.json(await searchSessionContents(sessions, query, request.signal), { headers });
+    const sessions = query && !request.signal.aborted
+      ? tenantSessionsForRequest(request, await listAllSessions()) : [];
+    const response = await searchSessionContents(sessions, query, request.signal);
+    const auth = requireTenantSession(request);
+    return NextResponse.json({ ...response, results: response.results.flatMap((result) => {
+      const session = workspaceSessionInfoToClient(auth, result.session);
+      return session ? [{ ...result, session }] : [];
+    }) }, { headers });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500, headers });
+    return NextResponse.json({ error: workspaceErrorMessageForClient(request, error) }, { status: 500, headers });
   }
 }

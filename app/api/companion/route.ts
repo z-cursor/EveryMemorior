@@ -48,13 +48,13 @@ export async function GET(request: Request) {
     return NextResponse.json({
       companion: { name: "凡小忆", isAi: true, relationshipId: assignment?.membershipId ?? auth.membership.id },
       assignment: assignment ? { sessionId: assignment.sessionId, configVersionId: assignment.configVersionId, assignedAt: assignment.assignedAt } : null,
-      config: config ? { version: config.version, publishedAt: config.publishedAt } : null,
+      config: config ? { version: config.version, publishedAt: config.publishedAt, thinkingLevel: config.thinkingLevel } : null,
       history,
       retention,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const status = error instanceof TenantAuthenticationError ? error.status : 500;
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to load companion" }, { status });
+    return NextResponse.json({ error: error instanceof TenantAuthenticationError ? error.message : "无法加载陪伴对话，请刷新后重试。" }, { status });
   }
 }
 
@@ -62,10 +62,20 @@ export async function POST(request: Request) {
   try {
     const { auth, key, store } = contextFor(request);
     scheduleCompanionRetentionSweep(store);
-    const body = await request.json() as { action?: unknown; clientMessageId?: unknown; text?: unknown };
+    const body = await request.json() as { action?: unknown; clientMessageId?: unknown; text?: unknown; level?: unknown };
     if (body.action === "stop") {
       abortTenantCompanionTurn(auth);
       return NextResponse.json({ ok: true });
+    }
+    if (body.action === "compact" || body.action === "set_thinking_level") {
+      if (body.action === "set_thinking_level" && !["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(String(body.level))) {
+        return NextResponse.json({ error: "Invalid thinking level" }, { status: 400 });
+      }
+      const session = await getCompanionSession(auth);
+      const result = body.action === "compact"
+        ? await session.send({ type: "compact" })
+        : await session.send({ type: "set_thinking_level", level: body.level as "auto" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" });
+      return NextResponse.json({ result });
     }
     if (typeof body.clientMessageId !== "string" || typeof body.text !== "string" || !body.clientMessageId.trim() || !body.text.trim()) {
       return NextResponse.json({ error: "clientMessageId and text are required" }, { status: 400 });
@@ -76,6 +86,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ turn: result }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const status = error instanceof TenantAuthenticationError ? error.status : 500;
-    return NextResponse.json({ error: error instanceof Error ? error.message : "Unable to run companion turn" }, { status });
+    return NextResponse.json({ error: error instanceof TenantAuthenticationError ? error.message : "凡小忆暂时无法回复，请稍后重试。" }, { status });
   }
 }

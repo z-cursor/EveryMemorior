@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import test from "node:test";
+import test, { after } from "node:test";
 import { createJiti } from "jiti";
 
 const listRoute = await readFile(new URL("./route.ts", import.meta.url), "utf8");
 const detailRoute = await readFile(new URL("./[id]/route.ts", import.meta.url), "utf8");
 const contextRoute = await readFile(new URL("./[id]/context/route.ts", import.meta.url), "utf8");
 const stateRoute = await readFile(new URL("./[id]/state/route.ts", import.meta.url), "utf8");
+const authRoot = mkdtempSync(join(tmpdir(), "pi-web-runtime-auth-"));
+const previousDatabasePath = process.env.PI_WEB_DATABASE_PATH;
+process.env.PI_WEB_DATABASE_PATH = join(authRoot, "tenant.sqlite");
 const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() },
   interopDefault: true,
@@ -25,6 +29,26 @@ const {
   invalidateSessionListCache,
 } = await jiti.import("../../../lib/session-reader.ts");
 const { SessionManager } = await jiti.import("@earendil-works/pi-coding-agent");
+const { setupTenantOwner, TENANT_SESSION_COOKIE } = await jiti.import("../../../lib/tenant-auth.ts");
+const { closeTenantStore } = await jiti.import("../../../lib/tenant-store.ts");
+const { token: authToken } = await setupTenantOwner({
+  tenantName: "Runtime Tests", tenantSlug: "runtime-tests", displayName: "Owner",
+  email: "owner@runtime.test", password: "correct horse battery staple",
+});
+
+function authorizedRequest(url, init = {}) {
+  return new Request(url, {
+    ...init,
+    headers: { Cookie: `${TENANT_SESSION_COOKIE}=${authToken}`, ...(init.headers ?? {}) },
+  });
+}
+
+after(() => {
+  closeTenantStore();
+  if (previousDatabasePath === undefined) delete process.env.PI_WEB_DATABASE_PATH;
+  else process.env.PI_WEB_DATABASE_PATH = previousDatabasePath;
+  rmSync(authRoot, { recursive: true, force: true });
+});
 
 test("list versions expose idle session creation, rename and deletion to other windows", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-web-list-sync-"));
@@ -40,7 +64,7 @@ test("list versions expose idle session creation, rename and deletion to other w
     await rm(dir, { recursive: true, force: true });
   });
   const list = async () => {
-    const response = await getSessionList(new Request("http://localhost/api/sessions"));
+    const response = await getSessionList(authorizedRequest("http://localhost/api/sessions"));
     assert.equal(response.status, 200);
     return response.json();
   };
@@ -59,9 +83,9 @@ test("list versions expose idle session creation, rename and deletion to other w
 
   const context = { params: Promise.resolve({ id: sessionId }) };
   const url = `http://localhost/api/sessions/${sessionId}`;
-  const renamed = await renameSession(new Request(url, { method: "PATCH", body: JSON.stringify({ name: "Renamed elsewhere" }) }), context);
+  const renamed = await renameSession(authorizedRequest(url, { method: "PATCH", body: JSON.stringify({ name: "Renamed elsewhere" }) }), context);
   assert.equal(renamed.status, 200);
-  const poll = await (await getRunningSessions()).json();
+  const poll = await (await getRunningSessions(authorizedRequest("http://localhost/api/agent/running"))).json();
   assert.deepEqual(poll.runningSessionIds, []);
   assert.ok(poll.sessionListVersion > created.sessionListVersion);
   const updated = await list();
@@ -69,11 +93,11 @@ test("list versions expose idle session creation, rename and deletion to other w
   assert.equal(updated.sessions[0].name, "Renamed elsewhere");
   assert.equal((await list()).sessionListVersion, poll.sessionListVersion, "reads must not create a refresh loop");
 
-  assert.equal((await deleteSession(new Request(url, { method: "DELETE" }), context)).status, 200);
+  assert.equal((await deleteSession(authorizedRequest(url, { method: "DELETE" }), context)).status, 200);
   const deleted = await list();
   assert.ok(deleted.sessionListVersion > updated.sessionListVersion);
   assert.deepEqual(deleted.sessions, []);
-  assert.equal((await (await getRunningSessions()).json()).sessionListVersion, deleted.sessionListVersion);
+  assert.equal((await (await getRunningSessions(authorizedRequest("http://localhost/api/agent/running"))).json()).sessionListVersion, deleted.sessionListVersion);
 });
 
 test("session listing returns a gzip-compressed response when the client accepts it", async (t) => {
@@ -94,7 +118,7 @@ test("session listing returns a gzip-compressed response when the client accepts
   manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() });
   invalidateSessionListCache();
 
-  const response = await getSessionList(new Request("http://localhost/api/sessions", {
+  const response = await getSessionList(authorizedRequest("http://localhost/api/sessions", {
     headers: { "Accept-Encoding": "gzip" },
   }));
 
@@ -126,6 +150,7 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
     cacheSessionPath(id, filePath);
     let shutdownCalled = false;
     globalThis.__piSessions.set(id, {
+      cwd: dir,
       isRunning: () => false,
       shutdown: async () => {
         shutdownCalled = true;
@@ -133,9 +158,9 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
         globalThis.__piSessions.delete(id);
       },
     });
-    const before = (await (await getRunningSessions()).json()).sessionListVersion;
+    const before = (await (await getRunningSessions(authorizedRequest("http://localhost/api/agent/running"))).json()).sessionListVersion;
     const response = await deleteSession(
-      new Request(`http://localhost/api/sessions/${id}`, { method: "DELETE" }),
+      authorizedRequest(`http://localhost/api/sessions/${id}`, { method: "DELETE" }),
       { params: Promise.resolve({ id }) },
     );
 
@@ -145,7 +170,7 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
     assert.equal(globalThis.__piSessions.has(id), false);
     assert.equal(globalThis.__piSessionPathCache.has(id), false);
     assert.equal([...globalThis.__piPathToSessionIdCache.values()].includes(id), false);
-    assert.ok((await (await getRunningSessions()).json()).sessionListVersion > before);
+    assert.ok((await (await getRunningSessions(authorizedRequest("http://localhost/api/agent/running"))).json()).sessionListVersion > before);
     await assert.rejects(readFile(filePath), { code: "ENOENT" });
   }
 });
@@ -238,7 +263,7 @@ test("deleting a session removes all persisted subagent descendants", async (t) 
   });
 
   const response = await deleteSession(
-    new Request(`http://localhost/api/sessions/${parentId}`, { method: "DELETE" }),
+    authorizedRequest(`http://localhost/api/sessions/${parentId}`, { method: "DELETE" }),
     { params: Promise.resolve({ id: parentId }) },
   );
 
@@ -282,11 +307,11 @@ test("live detail and state routes work without a persisted JSONL file", async (
 
   const routeContext = { params: Promise.resolve({ id }) };
   const detailResponse = await getSessionDetail(
-    new Request(`http://localhost/api/sessions/${id}`),
+    authorizedRequest(`http://localhost/api/sessions/${id}`),
     routeContext,
   );
   const stateResponse = await getSessionState(
-    new Request(`http://localhost/api/sessions/${id}/state`),
+    authorizedRequest(`http://localhost/api/sessions/${id}/state`),
     routeContext,
   );
   const detail = await detailResponse.json();
@@ -336,7 +361,7 @@ test("session detail returns a gzip-compressed response when the client accepts 
   });
 
   const response = await getSessionDetail(
-    new Request(`http://localhost/api/sessions/${id}`, {
+    authorizedRequest(`http://localhost/api/sessions/${id}`, {
       headers: { "Accept-Encoding": "gzip" },
     }),
     { params: Promise.resolve({ id }) },

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSessionEntries, resolveSessionPath } from "@/lib/session-reader";
+import { authorizeAgentSessionFileRequest } from "@/lib/tenant-agent-runtime";
+import { TenantAuthenticationError } from "@/lib/tenant-auth";
 
 export async function GET(
   req: Request,
@@ -15,6 +17,7 @@ export async function GET(
   try {
     const filePath = await resolveSessionPath(id);
     if (!filePath) return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    authorizeAgentSessionFileRequest(req, id, filePath);
 
     // SessionManager-backed parsing preserves the SDK's malformed-line tolerance.
     const entry = getSessionEntries(filePath).find((candidate) => candidate.id === entryId);
@@ -29,6 +32,7 @@ export async function GET(
 
     return NextResponse.json({ thinking: block.thinking });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    return NextResponse.json({ error: String(error) }, { status });
   }
 }

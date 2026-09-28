@@ -30,7 +30,7 @@ export function SystemPromptPanel({ loading, prompt, translate }: Props) {
           min-height: 220px;
           flex-direction: column;
           background: var(--bg-panel);
-          border-bottom: 1px solid var(--border);
+          border-bottom: var(--border-width) solid var(--border);
         }
         .system-prompt-scroll {
           min-height: 0;

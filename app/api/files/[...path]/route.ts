@@ -21,12 +21,16 @@ import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { isApiRequestAllowed } from "@/lib/request-security";
 import {
   inspectUploadTargets,
+  normalizeUploadFilePath,
   parseUploadConflictStrategy,
   validateUploadFileNames,
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { readTextPreviewChunk } from "@/lib/text-preview";
+import { authorizeAgentSessionRequest, tenantWorkspaceRootsForRequest } from "@/lib/tenant-agent-runtime";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
+import { workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
@@ -73,11 +77,15 @@ function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
 
-async function getUploadDirectory(segments: string[]): Promise<
+async function getUploadDirectory(request: Request, segments: string[]): Promise<
   { directory: string } | { response: NextResponse }
 > {
-  const directory = filePathFromApiSegments(segments);
-  const allowedRoots = await getAllowedFileRoots();
+  const session = requireTenantSession(request);
+  const directory = workspacePathFromClient(session, filePathFromApiSegments(segments));
+  if (!directory) return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  const globalRoots = await getAllowedFileRoots();
+  const allowedRoots = new Set(tenantWorkspaceRootsForRequest(request)
+    .filter((root) => isFilePathAllowed(root, globalRoots)));
   if (!isFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
@@ -115,6 +123,44 @@ function parseUploadFileNames(value: unknown): string[] | null {
   return value;
 }
 
+function normalizedUploadFileNames(fileNames: string[]): string[] {
+  return fileNames.map((fileName) => normalizeUploadFilePath(fileName) ?? fileName);
+}
+
+function checkUploadParents(directory: string, fileName: string): void {
+  let parent = directory;
+  for (const part of fileName.split("/").slice(0, -1)) {
+    parent = path.join(parent, part);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(parent);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error("Upload path contains a non-directory or symbolic link");
+    }
+  }
+}
+
+/** Create nested directory entries without allowing a symlink to escape the workspace. */
+function ensureUploadParent(directory: string, fileName: string): string {
+  const parts = fileName.split("/");
+  let parent = directory;
+  for (const part of parts.slice(0, -1)) {
+    parent = path.join(parent, part);
+    try {
+      fs.mkdirSync(parent);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const stat = fs.lstatSync(parent);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Upload path contains a non-directory or symbolic link");
+  }
+  return parent;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
@@ -124,8 +170,9 @@ export async function POST(
   }
 
   try {
+    const hostAccess = canManageHostConfiguration(requireTenantSession(request));
     const { path: segments } = await params;
-    const uploadDirectory = await getUploadDirectory(segments);
+    const uploadDirectory = await getUploadDirectory(request, segments);
     if ("response" in uploadDirectory) return uploadDirectory.response;
     const { directory } = uploadDirectory;
     const type = request.nextUrl.searchParams.get("type") ?? "upload";
@@ -140,7 +187,13 @@ export async function POST(
       if (validationError) {
         return NextResponse.json({ error: validationError }, { status: 400 });
       }
-      return NextResponse.json(inspectUploadTargets(directory, fileNames));
+      const normalizedFileNames = normalizedUploadFileNames(fileNames);
+      try {
+        normalizedFileNames.forEach((fileName) => checkUploadParents(directory, fileName));
+      } catch (error) {
+        return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid upload path" }, { status: 400 });
+      }
+      return NextResponse.json(inspectUploadTargets(directory, normalizedFileNames));
     }
 
     if (type !== "upload") {
@@ -168,13 +221,35 @@ export async function POST(
     if (files.reduce((total, file) => total + file.size, 0) > MAX_UPLOAD_TOTAL_BYTES) {
       return NextResponse.json({ error: "Uploads must total 100MB or less" }, { status: 413 });
     }
-    const fileNames = files.map((file) => file.name);
+    const filePathsField = formData.get("filePaths");
+    let fileNames = files.map((file) => file.name);
+    if (filePathsField !== null) {
+      if (typeof filePathsField !== "string") {
+        return NextResponse.json({ error: "filePaths must be a JSON array of strings" }, { status: 400 });
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(filePathsField);
+      } catch {
+        return NextResponse.json({ error: "filePaths must be a JSON array of strings" }, { status: 400 });
+      }
+      if (!Array.isArray(parsed) || parsed.length !== files.length || parsed.some((value) => typeof value !== "string")) {
+        return NextResponse.json({ error: "filePaths must be a JSON array matching the uploaded files" }, { status: 400 });
+      }
+      fileNames = parsed;
+    }
     const validationError = validateUploadFileNames(fileNames);
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
 
-    const inspection = inspectUploadTargets(directory, fileNames);
+    const normalizedFileNames = normalizedUploadFileNames(fileNames);
+    try {
+      normalizedFileNames.forEach((fileName) => checkUploadParents(directory, fileName));
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid upload path" }, { status: 400 });
+    }
+    const inspection = inspectUploadTargets(directory, normalizedFileNames);
     if (strategy === "error" && inspection.conflicts.length > 0) {
       return NextResponse.json({
         error: "One or more files already exist",
@@ -189,14 +264,22 @@ export async function POST(
     const skipped: string[] = [];
     const errors: Array<{ name: string; error: string }> = [];
 
-    for (const file of files) {
-      const destination = path.join(directory, file.name);
-      if (conflictSet.has(file.name) && strategy === "skip") {
-        skipped.push(file.name);
+    for (const [index, file] of files.entries()) {
+      const fileName = normalizedFileNames[index];
+      let parent: string;
+      try {
+        parent = ensureUploadParent(directory, fileName);
+      } catch (error) {
+        errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
         continue;
       }
-      if (conflictSet.has(file.name) && nonReplaceableSet.has(file.name)) {
-        errors.push({ name: file.name, error: "Cannot replace a directory or symbolic link" });
+      const destination = path.join(parent, path.basename(fileName));
+      if (conflictSet.has(fileName) && strategy === "skip") {
+        skipped.push(fileName);
+        continue;
+      }
+      if (conflictSet.has(fileName) && nonReplaceableSet.has(fileName)) {
+        errors.push({ name: fileName, error: "Cannot replace a directory or symbolic link" });
         continue;
       }
 
@@ -204,24 +287,24 @@ export async function POST(
       try {
         bytes = Buffer.from(await file.arrayBuffer());
       } catch (error) {
-        errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
+        errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
         continue;
       }
 
-      if (conflictSet.has(file.name)) {
+      if (conflictSet.has(fileName)) {
         try {
           fs.unlinkSync(destination);
         } catch (error) {
-          errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
+          errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
           continue;
         }
       }
 
       try {
         fs.writeFileSync(destination, bytes, { flag: "wx" });
-        uploaded.push(file.name);
+        uploaded.push(fileName);
       } catch (error) {
-        errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
+        errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
       }
     }
 
@@ -230,7 +313,50 @@ export async function POST(
       { status: errors.length > 0 ? 207 : 200 },
     );
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return NextResponse.json({ error: workspaceErrorMessageForClient(request, error) }, { status: 500 });
+  }
+}
+
+/** Delete one workspace file or directory. Protected roots and names stay intact. */
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> },
+) {
+  if (!isApiRequestAllowed(request)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
+  try {
+    const session = requireTenantSession(request);
+    const { path: segments } = await params;
+    if (segments.some((segment) => IGNORED_NAMES.has(segment))) {
+      return NextResponse.json({ error: "Protected files cannot be deleted" }, { status: 403 });
+    }
+    const requestedPath = filePathFromApiSegments(segments);
+    const filePath = workspacePathFromClient(session, requestedPath);
+    if (!filePath) return NextResponse.json({ error: "Access denied" }, { status: 403 });
+
+    const globalRoots = await getAllowedFileRoots();
+    const allowedRoots = new Set(tenantWorkspaceRootsForRequest(request)
+      .filter((root) => isFilePathAllowed(root, globalRoots)));
+    if (!isFilePathAllowed(filePath, allowedRoots) || !isExistingFilePathAllowed(filePath, allowedRoots)) {
+      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+    if ([...allowedRoots].some((root) => samePath(root, filePath))) {
+      return NextResponse.json({ error: "Workspace roots cannot be deleted" }, { status: 400 });
+    }
+
+    const stat = fs.lstatSync(filePath);
+    if (stat.isDirectory()) fs.rmSync(filePath, { recursive: true, force: false });
+    else if (stat.isFile()) fs.unlinkSync(filePath);
+    else return NextResponse.json({ error: "Only files and directories can be deleted" }, { status: 400 });
+    return NextResponse.json({
+      deleted: workspacePathToClient(session, filePath),
+      deletedType: stat.isDirectory() ? "directory" : "file",
+    });
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? String((error as NodeJS.ErrnoException).code) : "";
+    if (code === "ENOENT") return NextResponse.json({ error: "File not found" }, { status: 404 });
+    return NextResponse.json({ error: workspaceErrorMessageForClient(request, error) }, { status: 500 });
   }
 }
 
@@ -421,7 +547,10 @@ export async function GET(
 ) {
   try {
     const { path: segments } = await params;
-    const filePath = filePathFromApiSegments(segments);
+    const session = requireTenantSession(request);
+    const requestedPath = filePathFromApiSegments(segments);
+    const filePath = workspacePathFromClient(session, requestedPath);
+    if (!filePath) return NextResponse.json({ error: "Access denied" }, { status: 403 });
     const rawType = request.nextUrl.searchParams.get("type") ?? "list";
     const type = parseFileRequestType(rawType);
     if (!type) {
@@ -429,12 +558,18 @@ export async function GET(
     }
     const sessionId = request.nextUrl.searchParams.get("sessionId");
 
-    const allowedRoots = await getAllowedFileRoots();
+    const globalRoots = await getAllowedFileRoots();
+    const allowedRoots = new Set(tenantWorkspaceRootsForRequest(request)
+      .filter((root) => isFilePathAllowed(root, globalRoots)));
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
     const allowedBySessionReference =
+      canManageHostConfiguration(session) &&
       !allowedByRoot &&
       type !== "list" &&
       await isFilePathReferencedBySession(filePath, sessionId);
+    if (allowedBySessionReference && sessionId) {
+      authorizeAgentSessionRequest(request, sessionId);
+    }
     if (!allowedByRoot && !allowedBySessionReference) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
@@ -604,7 +739,7 @@ export async function GET(
             });
             // The client snapshots only after this event, so emit it after the
             // watcher exists to avoid dropping changes between those steps.
-            send("connected", { filePath });
+            send("connected", { filePath: requestedPath });
           } catch {
             send("error", { message: "Failed to watch file" });
             controller.close();
@@ -646,8 +781,8 @@ export async function GET(
         return a.name.localeCompare(b.name);
       });
 
-    return NextResponse.json({ entries, path: filePath });
+    return NextResponse.json({ entries, path: workspacePathToClient(session, filePath) });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return NextResponse.json({ error: workspaceErrorMessageForClient(request, error) }, { status: 500 });
   }
 }

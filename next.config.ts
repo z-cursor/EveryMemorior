@@ -13,6 +13,9 @@ try {
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: configDir,
+  // Proxy clones request bodies before route handlers. Keep its limit above the
+  // upload route's 101 MB wire limit so that route can return 413 itself.
+  experimental: { proxyClientMaxBodySize: "102mb" },
   serverExternalPackages: [
     "node-pty",
     "undici",

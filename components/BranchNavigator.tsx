@@ -192,21 +192,21 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
           borderRadius: "50%",
           flexShrink: 0,
           background: isActive ? "var(--accent)" : isOnPath ? "var(--text-muted)" : "var(--border)",
-          border: isActive ? "none" : "1px solid var(--text-dim)",
+          border: isActive ? "none" : "var(--border-width) solid var(--text-dim)",
           marginRight: 6,
-          transition: "background 0.12s",
+          transition: "background var(--duration-fast)",
         }} />
 
         {/* Role badge */}
         {role && (
           <span style={{
-            fontSize: 9,
+            fontSize: "var(--font-size-micro)",
             fontFamily: "var(--font-mono)",
             color: role === "user" ? "var(--accent)" : "var(--text-dim)",
             background: role === "user" ? "rgba(37,99,235,0.08)" : "var(--bg-hover)",
-            border: `1px solid ${role === "user" ? "rgba(37,99,235,0.2)" : "var(--border)"}`,
-            borderRadius: 3,
-            padding: "0 4px",
+            border: `var(--border-width) solid ${role === "user" ? "rgba(37,99,235,0.2)" : "var(--border)"}`,
+            borderRadius: "var(--radius-xs)",
+            padding: "0 var(--space-1)",
             marginRight: 5,
             flexShrink: 0,
             lineHeight: "16px",
@@ -217,14 +217,14 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
 
         {/* Skipped indicator */}
         {skipped > 0 && (
-          <span style={{ fontSize: 10, color: "var(--text-dim)", marginRight: 5, flexShrink: 0 }}>
+          <span style={{ fontSize: "var(--font-size-caption)", color: "var(--text-dim)", marginRight: 5, flexShrink: 0 }}>
             +{skipped}
           </span>
         )}
 
         {/* Label */}
         <span style={{
-          fontSize: 11,
+          fontSize: "var(--font-size-meta)",
           color: isActive ? "var(--text)" : isOnPath ? "var(--text-muted)" : "var(--text-dim)",
           fontWeight: isActive ? 500 : 400,
           overflow: "hidden",
@@ -302,7 +302,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   );
 
   const chevron = (
-    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 2, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 2, transform: open ? "rotate(180deg)" : "none", transition: "transform var(--duration-normal)" }}>
       <polyline points="2 3.5 5 6.5 8 3.5" />
     </svg>
   );
@@ -317,16 +317,16 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           style={{
             display: hideInlineButton ? "none" : "flex",
             alignItems: "center",
-            gap: 6,
+            gap: "var(--space-1-5)",
             height: "100%",
-            padding: "0 12px",
+            padding: "0 var(--space-3)",
             background: open ? "var(--bg-selected)" : "none",
             border: "none",
             borderTop: open ? "2px solid var(--accent)" : "2px solid transparent",
-            borderRight: "1px solid var(--border)",
+            borderRight: "var(--border-width) solid var(--border)",
             cursor: "pointer",
             color: open ? "var(--text)" : "var(--text-muted)",
-            fontSize: 11,
+            fontSize: "var(--font-size-meta)",
             whiteSpace: "nowrap",
             transition: "color 0.1s, background 0.1s",
           }}
@@ -346,11 +346,11 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
             left: dropdownPos.left,
             width: dropdownPos.width,
             background: "var(--bg-panel)",
-            borderBottom: "1px solid var(--border)",
+            borderBottom: "var(--border-width) solid var(--border)",
             zIndex: 500,
           }}>
             {hasContent ? (
-              <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+              <div style={{ padding: "var(--space-1) var(--space-3) var(--space-2) var(--space-3)", maxHeight: 260, overflowY: "auto" }}>
                 {topLevel.map((child, idx) => (
                   <TreeNodeView
                     key={child.entry.id}
@@ -364,7 +364,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
                 ))}
               </div>
             ) : (
-              <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+              <div style={{ padding: "var(--space-2-5) var(--space-4)", fontSize: "var(--font-size-control)", color: "var(--text-muted)", fontStyle: "italic" }}>
                 {noBranchReason}
               </div>
             )}
@@ -375,21 +375,21 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   }
 
   return (
-    <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg)", flexShrink: 0, position: "relative" }}>
+    <div style={{ borderBottom: "var(--border-width) solid var(--border)", background: "var(--bg)", flexShrink: 0, position: "relative" }}>
       {/* Header toggle */}
       <button
         onClick={() => setOpenInternal((v) => !v)}
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 6,
+          gap: "var(--space-1-5)",
           width: "100%",
-          padding: "5px 12px",
+          padding: "5px var(--space-3)",
           background: "none",
           border: "none",
           cursor: "pointer",
           color: "var(--text-muted)",
-          fontSize: 11,
+          fontSize: "var(--font-size-meta)",
           textAlign: "left",
         }}
       >
@@ -406,12 +406,12 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           left: 0,
           right: 0,
           background: "var(--bg)",
-          borderBottom: "1px solid var(--border)",
+          borderBottom: "var(--border-width) solid var(--border)",
           boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
           zIndex: 100,
         }}>
           {hasContent ? (
-            <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+            <div style={{ padding: "var(--space-1) var(--space-3) var(--space-2) var(--space-3)", maxHeight: 260, overflowY: "auto" }}>
               {topLevel.map((child, idx) => (
                 <TreeNodeView
                   key={child.entry.id}
@@ -425,7 +425,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
               ))}
             </div>
           ) : (
-            <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+            <div style={{ padding: "var(--space-2-5) var(--space-4)", fontSize: "var(--font-size-control)", color: "var(--text-muted)", fontStyle: "italic" }}>
               {noBranchReason ?? t("i18n.noBranches")}
             </div>
           )}

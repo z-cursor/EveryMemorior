@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { abortSubagent, getSubagentRun, steerSubagent } from "@/lib/rpc-manager";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  if (!canManageHostConfiguration(requireTenantSession(req))) {
+    return NextResponse.json({ error: "Subagents are unavailable to tenant members" }, { status: 403 });
+  }
   const { id } = await params;
   try {
     const run = await getSubagentRun(id);
@@ -21,6 +25,9 @@ export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  if (!canManageHostConfiguration(requireTenantSession(req))) {
+    return NextResponse.json({ error: "Subagents are unavailable to tenant members" }, { status: 403 });
+  }
   const { id } = await params;
   try {
     const body = await req.json() as { action?: unknown; message?: unknown };

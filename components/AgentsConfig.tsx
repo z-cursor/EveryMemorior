@@ -60,11 +60,11 @@ const inputStyle: CSSProperties = {
   minWidth: 0,
   height: 34,
   padding: "0 9px",
-  border: "1px solid var(--border)",
-  borderRadius: 5,
+  border: "var(--border-width) solid var(--border)",
+  borderRadius: "var(--radius-item)",
   background: "var(--bg)",
   color: "var(--text)",
-  fontSize: 12,
+  fontSize: "var(--font-size-control)",
   outline: "none",
 };
 
@@ -129,7 +129,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function Toggle({ checked, disabled, label, onChange }: { checked: boolean; disabled: boolean; label: string; onChange: (checked: boolean) => void }) {
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 7, color: disabled ? "var(--text-dim)" : "var(--text-muted)", fontSize: 12, cursor: disabled ? "default" : "pointer" }}>
+    <label style={{ display: "flex", alignItems: "center", gap: 7, color: disabled ? "var(--text-dim)" : "var(--text-muted)", fontSize: "var(--font-size-control)", cursor: disabled ? "default" : "pointer" }}>
       <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
       {label}
     </label>
@@ -486,7 +486,7 @@ export function AgentsConfig({
         <ConfigSidebar>
           <ConfigSidebarList>
               {loading ? (
-                <div style={{ padding: 10, color: "var(--text-dim)", fontSize: 12 }}>{t("agents.loading")}</div>
+                <div style={{ padding: 10, color: "var(--text-dim)", fontSize: "var(--font-size-control)" }}>{t("agents.loading")}</div>
               ) : (["project", "global", "workspace", "builtin"] as const).map((scope) => {
                 const scopedProfiles = profiles.filter((profile) => profile.scope === scope);
                 if (scopedProfiles.length === 0) return null;
@@ -545,14 +545,14 @@ export function AgentsConfig({
 
                   {creating && (
                     <Field label={t("agents.saveScope")}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "var(--border-width) solid var(--border)", borderRadius: "var(--radius-item)", background: "var(--bg-panel)" }}>
                         {(["global", "project"] as const).map((scope) => (
                           <button
                             key={scope}
                             type="button"
                             onClick={() => setTargetScope(scope)}
                             disabled={saving}
-                            style={{ height: 28, border: "none", borderRadius: 4, background: targetScope === scope ? "var(--bg-selected)" : "transparent", color: targetScope === scope ? "var(--text)" : "var(--text-muted)", cursor: saving ? "default" : "pointer", fontSize: 11, fontWeight: targetScope === scope ? 600 : 400 }}
+                            style={{ height: 28, border: "none", borderRadius: "var(--radius-sm)", background: targetScope === scope ? "var(--bg-selected)" : "transparent", color: targetScope === scope ? "var(--text)" : "var(--text-muted)", cursor: saving ? "default" : "pointer", fontSize: "var(--font-size-meta)", fontWeight: targetScope === scope ? 600 : 400 }}
                           >
                             {t(`agents.scope.${scope}`)}
                           </button>
@@ -561,12 +561,12 @@ export function AgentsConfig({
                     </Field>
                   )}
 
-                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(0, 1fr)", gap: "var(--space-3)" }}>
                     <Field label={t("agents.name")}>
                       {creating ? (
                         <input aria-label={t("agents.name")} value={draft.name} disabled={disabled} onChange={(event) => update("name", event.target.value)} style={inputStyle} />
                       ) : (
-                        <code style={{ minHeight: 34, display: "flex", alignItems: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12 }}>
+                        <code style={{ minHeight: 34, display: "flex", alignItems: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: "var(--font-size-control)" }}>
                           {draft.name}
                         </code>
                       )}
@@ -597,9 +597,9 @@ export function AgentsConfig({
                     </div>
                   </Field>
 
-                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: "var(--space-3)" }}>
                     <Field label={t("agents.model")}>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-1)" }}>
                         <ModelSelector
                           options={modelSelectorOptions}
                           value={selectedModel}
@@ -612,7 +612,7 @@ export function AgentsConfig({
                           variant="field"
                           placement="auto"
                         />
-                        {modelsError && <span style={{ color: "#ef4444", fontSize: 10 }}>{modelsError}</span>}
+                        {modelsError && <span style={{ color: "var(--palette-red-500)", fontSize: "var(--font-size-caption)" }}>{modelsError}</span>}
                       </div>
                     </Field>
                     <Field label={t("agents.thinking")}>
@@ -634,7 +634,7 @@ export function AgentsConfig({
           </ConfigDetailStack>
         </ConfigDetail>
       </ConfigSplitView>
-      <ConfigFooter status={(settingsError || error) && <span role="alert" style={{ color: "#ef4444" }}>{settingsError || error}</span>}>
+      <ConfigFooter status={(settingsError || error) && <span role="alert" style={{ color: "var(--palette-red-500)" }}>{settingsError || error}</span>}>
         {editing && (
           <ConfigButton
             variant="primary"

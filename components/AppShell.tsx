@@ -9,14 +9,14 @@ import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
-import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
+import { SettingsPanel } from "./SettingsPanel";
+import { AccountMenu } from "./AccountMenu";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
 import { TerminalPanel } from "./TerminalPanel";
-import { CompanionShell } from "./CompanionShell";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
@@ -60,7 +60,7 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { getSessionFamily } from "@/lib/session-family";
-import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import type { SettingsSection } from "@/lib/settings-navigation";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 type AutoNameStatus =
@@ -78,15 +78,21 @@ function parkedNewSessionDraftKey(cwd: string): string {
 
 export function AppShell() {
   const [hostAccess, setHostAccess] = useState<boolean | null>(null);
-  const [tenantRole, setTenantRole] = useState<string | null>(null);
+  const [sessionUtilitiesAccess, setSessionUtilitiesAccess] = useState(false);
+  const [conversationMode, setConversationMode] = useState<"chat" | "work">("work");
   useEffect(() => {
     void fetch("/api/web-auth", { cache: "no-store" })
       .then((response) => response.json())
       .then((body) => {
-        setHostAccess(body.account?.hostAccess === true);
-        setTenantRole(typeof body.account?.membership?.role === "string" ? body.account.membership.role : null);
+        const isHost = body.account?.hostAccess === true;
+        setHostAccess(isHost);
+        setSessionUtilitiesAccess(isHost || body.account?.membership?.role === "admin" || body.account?.membership?.role === "owner");
+        if (!selectedSessionRef.current) setConversationMode(isHost ? "work" : "chat");
       })
-      .catch(() => setHostAccess(false));
+      .catch(() => {
+        setHostAccess(false);
+        if (!selectedSessionRef.current) setConversationMode("chat");
+      });
   }, []);
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -131,9 +137,17 @@ export function AppShell() {
     if (soundEnabledRef.current) playDoneSound();
   }, [playDoneSound, soundEnabledRef]);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
+  const selectedSessionRef = useRef<SessionInfo | null>(null);
+  selectedSessionRef.current = selectedSession;
+  const selectedSessionMode = selectedSession ? (selectedSession.chatOnly ? "chat" : "work") : null;
+  useEffect(() => {
+    if (selectedSessionMode) setConversationMode(selectedSessionMode);
+  }, [selectedSession?.id, selectedSessionMode]);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
+  const [sessionCatalogLoaded, setSessionCatalogLoaded] = useState(false);
   const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
     setSessionCatalog(sessions);
+    setSessionCatalogLoaded(true);
   }, []);
   const sessionsWithSelection = useMemo(() => {
     if (!selectedSession) return sessionCatalog;
@@ -450,7 +464,7 @@ export function AppShell() {
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
-  const panelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
+  const panelTabs: Tab[] = [...fileTabs, ...(hostAccess ? terminalTabs : []).map((tab) => ({
     id: tab.id,
     label: getFileName(tab.cwd) || tab.cwd,
     filePath: tab.cwd,
@@ -692,6 +706,7 @@ export function AppShell() {
   }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number) => {
+    setConversationMode(session.chatOnly ? "chat" : "work");
     setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
     invalidateWorkspaceRestore();
     const activeDraftKey = activeNewSessionDraftKeyRef.current;
@@ -765,6 +780,36 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
   }, [invalidateWorkspaceRestore, router, isMobile]);
+
+  // A session can disappear from the current tenant after an organization
+  // switch, logout/login, or a server-side binding change. Do not leave the
+  // chat mounted with an inaccessible id: it would repeatedly retry the SSE
+  // endpoint and every tool command with a misleading tenant error.
+  const handleSessionAccessLost = useCallback(() => {
+    invalidateWorkspaceRestore();
+    activeNewSessionDraftKeyRef.current = null;
+    setSelectedSession(null);
+    setNewSessionCwd(null);
+    setActiveCwd(null);
+    activeProjectKeyRef.current = null;
+    setFileTabs([]);
+    setActiveFileTabId(null);
+    setRightPanelOpen(false);
+    setSessionKey((k) => k + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
+    setSystemPrompt(null);
+    setSystemTools(null);
+    setSystemInfoLoading(false);
+    setActiveTopPanel(null);
+    router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
+  }, [invalidateWorkspaceRestore, router]);
+
+  useEffect(() => {
+    if (!sessionCatalogLoaded || !selectedSession || selectedSession.transient) return;
+    if (sessionCatalog.some((candidate) => candidate.id === selectedSession.id)) return;
+    handleSessionAccessLost();
+  }, [handleSessionAccessLost, selectedSession, sessionCatalog, sessionCatalogLoaded]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -956,7 +1001,13 @@ export function AppShell() {
 
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
-  }, []);
+    // The URL may contain a session from another tenant or an old browser
+    // tab. SessionSidebar only restores ids present in the current tenant's
+    // catalogue; remove an invalid id before the chat runtime can use it.
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("session")) {
+      router.replace(window.location.pathname, { scroll: false });
+    }
+  }, [router]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     invalidateWorkspaceRestore();
@@ -1059,6 +1110,7 @@ export function AppShell() {
   }, [newSessionDraftKey]);
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   const projectTrustCwd = selectedSession?.cwd ?? effectiveNewSessionCwd;
+  const trustLookupCwd = conversationMode === "work" ? projectTrustCwd : null;
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
@@ -1066,14 +1118,18 @@ export function AppShell() {
     setProjectTrust(null);
     setProjectTrustDialogOpen(false);
     setProjectTrustError(null);
-    if (!projectTrustCwd) return;
+    if (hostAccess !== true || !trustLookupCwd) return;
 
     const controller = new AbortController();
-    fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
+    fetch(`/api/project-trust?cwd=${encodeURIComponent(trustLookupCwd)}`, {
       signal: controller.signal,
     })
       .then(async (response) => {
         const data = await response.json() as ProjectTrustStatus & { error?: string };
+        if (response.status === 400 && data.error === "Directory does not exist") {
+          setProjectTrustError(data.error);
+          return;
+        }
         if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
         setProjectTrust(data);
       })
@@ -1082,17 +1138,17 @@ export function AppShell() {
         console.error("Failed to load project trust:", error);
       });
     return () => controller.abort();
-  }, [projectTrustCwd]);
+  }, [hostAccess, trustLookupCwd]);
 
   const handleTrustProject = useCallback(async () => {
-    if (!projectTrustCwd || projectTrustBusy) return;
+    if (hostAccess !== true || !trustLookupCwd || projectTrustBusy) return;
     setProjectTrustBusy(true);
     setProjectTrustError(null);
     try {
       const response = await fetch("/api/project-trust", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: projectTrustCwd }),
+        body: JSON.stringify({ cwd: trustLookupCwd }),
       });
       const data = await response.json() as ProjectTrustStatus & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
@@ -1105,11 +1161,11 @@ export function AppShell() {
     } finally {
       setProjectTrustBusy(false);
     }
-  }, [projectTrustBusy, projectTrustCwd]);
+  }, [hostAccess, projectTrustBusy, trustLookupCwd]);
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - Pi Web` : "Pi Web";
+  const windowTitle = activeCwdName ? `${activeCwdName} - EM` : "EM";
 
   useEffect(() => {
     const syncWindowTitle = () => {
@@ -1127,16 +1183,26 @@ export function AppShell() {
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
         onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
+        onSelectCompanion={(cwd) => {
+          handleNewSession(`companion-${Date.now()}`, cwd);
+          setConversationMode("chat");
+        }}
+        onCreateSession={(cwd) => {
+          handleNewSession(`sidebar-${Date.now()}`, cwd);
+          setConversationMode("work");
+        }}
+        companionActive={conversationMode === "chat" && !selectedSession?.chatOnly}
         initialSessionId={initialSessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
+        onProjectRemoved={handleSessionAccessLost}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
-        onOpenTerminal={handleOpenTerminal}
+        onOpenTerminal={hostAccess ? handleOpenTerminal : undefined}
+        tenantWorkspaceOnly={hostAccess !== true}
         explorerRefreshKey={explorerRefreshKey}
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
@@ -1145,58 +1211,19 @@ export function AppShell() {
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
       />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
-        {([
-          ["models", translate("common.models")],
-          ["skills", translate("common.skills")],
-        ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
-          return (
-            <button
-              key={section}
-              type="button"
-              onClick={() => setSettingsSection(section)}
-              disabled={disabled}
-              title={disabled ? translate("settings.projectRequired") : label}
-              aria-label={label}
-              style={{
-                flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                height: 32, padding: 0, background: "none", border: "none",
-                borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-                fontSize: 12, opacity: disabled ? 0.35 : 1,
-                transition: "background 0.12s, color 0.12s",
-              }}
-              onMouseEnter={(event) => { if (!disabled) { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; } }}
-              onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
-            >
-              <SettingsSectionIcon section={section} size={14} strokeWidth={2} />
-              <span>{label}</span>
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => setSettingsSection(getLastSettingsSection(projectTrustCwd))}
-          title={translate("common.settings")}
-          aria-label={translate("common.settings")}
-          style={{
-            flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            height: 32, padding: 0, background: "none", border: "none",
-            borderRadius: 9, color: "var(--text-muted)", cursor: "pointer",
-            fontSize: 12, transition: "background 0.12s, color 0.12s",
-          }}
-          onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; event.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(event) => { event.currentTarget.style.background = "none"; event.currentTarget.style.color = "var(--text-muted)"; }}
-        >
-          <SettingsSectionIcon section="general" size={14} strokeWidth={2} />
-          <span>{translate("common.settings")}</span>
-        </button>
-      </div>
+      <AccountMenu projectOpen={Boolean(projectTrustCwd)} onOpenSettings={setSettingsSection} />
     </>
   );
 
   const renderProjectTrustWarning = (mobileBanner: boolean) => {
-    if (!showChat || !projectTrust?.requiresTrust || projectTrust.trusted) return null;
+    if (conversationMode !== "work" || !showChat) return null;
+    if (projectTrustError === "Directory does not exist") {
+      return <div role="status" title={translate("trust.directoryMissing")}
+        style={{ display: "flex", alignItems: "center", padding: "0 12px", color: "var(--palette-amber-600)", fontSize: "var(--font-size-meta)" }}>
+        {translate("trust.directoryMissing")}
+      </div>;
+    }
+    if (!projectTrust?.requiresTrust || projectTrust.trusted) return null;
     return (
       <button
         type="button"
@@ -1210,19 +1237,19 @@ export function AppShell() {
           display: "flex",
           alignItems: "center",
           justifyContent: mobileBanner ? "flex-start" : "center",
-          gap: 6,
+          gap: "var(--space-1-5)",
           width: mobileBanner ? "100%" : undefined,
           minHeight: mobileBanner ? 32 : undefined,
           height: mobileBanner ? undefined : "100%",
           padding: mobileBanner ? "6px 12px" : "0 12px",
-          background: mobileBanner ? "color-mix(in srgb, #d97706 8%, var(--bg-panel))" : "none",
+          background: mobileBanner ? "color-mix(in srgb, var(--palette-amber-600) 8%, var(--bg-panel))" : "none",
           border: "none",
-          borderRight: mobileBanner ? "none" : "1px solid var(--border)",
-          borderBottom: mobileBanner ? "1px solid var(--border)" : "none",
-          color: "#d97706",
+          borderRight: mobileBanner ? "none" : "var(--border-width) solid var(--border)",
+          borderBottom: mobileBanner ? "var(--border-width) solid var(--border)" : "none",
+          color: "var(--palette-amber-600)",
           cursor: "pointer",
           flexShrink: 0,
-          fontSize: 11,
+          fontSize: "var(--font-size-meta)",
           lineHeight: 1.35,
           textAlign: "left",
         }}
@@ -1250,7 +1277,8 @@ export function AppShell() {
   };
 
   const renderChatToolbarActions = (mobile: boolean) => {
-    if (!mobile && !showChat) return null;
+    if ((!mobile && !showChat) || !sessionUtilitiesAccess || !selectedSession || selectedSession.transient
+      || (conversationMode === "chat" && !selectedSession.chatOnly)) return null;
     return (
       <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
         <button
@@ -1259,36 +1287,33 @@ export function AppShell() {
             handleViewFullHistory();
             if (mobile && isNarrowMobile) setMobileToolbarMoreOpen(true);
           }}
-          disabled={!selectedSession}
-          title={selectedSession ? translate("history.full") : translate("history.unsaved")}
+          title={translate("history.full")}
           aria-label={translate("history.full")}
           style={{
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            gap: 6,
+            gap: "var(--space-1-5)",
             width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
             height: "100%",
             padding: mobile ? 0 : "0 12px",
             background: "none",
             border: "none",
             borderTop: "2px solid transparent",
-            borderRight: "1px solid var(--border)",
-            color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
-            cursor: selectedSession ? "pointer" : "not-allowed",
-            opacity: selectedSession ? 1 : 0.45,
+            borderRight: "var(--border-width) solid var(--border)",
+            color: "var(--text-muted)",
+            cursor: "pointer",
             flexShrink: 0,
-            fontSize: 11,
+            fontSize: "var(--font-size-meta)",
             whiteSpace: "nowrap",
             transition: "color 0.1s, background 0.1s, opacity 0.1s",
           }}
           onMouseEnter={(event) => {
-            if (!selectedSession) return;
             event.currentTarget.style.color = "var(--text)";
             event.currentTarget.style.background = "var(--bg-hover)";
           }}
           onMouseLeave={(event) => {
-            event.currentTarget.style.color = selectedSession ? "var(--text-muted)" : "var(--text-dim)";
+            event.currentTarget.style.color = "var(--text-muted)";
             event.currentTarget.style.background = "none";
           }}
           data-mobile-toolbar-action={mobile ? "history" : undefined}
@@ -1303,7 +1328,7 @@ export function AppShell() {
             strokeLinecap="round"
             strokeLinejoin="round"
             style={{
-              color: selectedSession ? "var(--text-muted)" : "var(--text-dim)",
+              color: "var(--text-muted)",
               flexShrink: 0,
             }}
             aria-hidden="true"
@@ -1320,6 +1345,7 @@ export function AppShell() {
             selectedSession
             && ((sessionStats?.userMessages ?? 0) > 0 || selectedSession.messageCount > 0),
           );
+          if (!hasMessages) return null;
           const disabled = !selectedSession || selectedSession.transient || !hasMessages || autoNameStatus.kind === "naming";
           const isSuccess = autoNameStatus.kind === "success";
           const isError = autoNameStatus.kind === "error";
@@ -1349,25 +1375,25 @@ export function AppShell() {
               title={title}
               aria-label={label}
               style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--space-1-5)",
                 width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
                 height: "100%", padding: mobile ? 0 : "0 12px",
                 background: "none", border: "none",
                 borderTop: "2px solid transparent",
-                borderRight: "1px solid var(--border)",
-                color: isError ? "#dc2626" : isSuccess ? "var(--accent)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
+                borderRight: "var(--border-width) solid var(--border)",
+                color: isError ? "var(--palette-red-600)" : isSuccess ? "var(--accent)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
                 cursor: disabled ? "not-allowed" : "pointer",
                 opacity: disabled && autoNameStatus.kind !== "naming" ? 0.45 : 1,
-                flexShrink: 0, fontSize: 11, whiteSpace: "nowrap",
+                flexShrink: 0, fontSize: "var(--font-size-meta)", whiteSpace: "nowrap",
                 transition: "color 0.1s, background 0.1s, opacity 0.1s",
               }}
               onMouseEnter={(event) => {
                 if (disabled) return;
-                event.currentTarget.style.color = isError ? "#dc2626" : "var(--text)";
+                event.currentTarget.style.color = isError ? "var(--palette-red-600)" : "var(--text)";
                 event.currentTarget.style.background = "var(--bg-hover)";
               }}
               onMouseLeave={(event) => {
-                event.currentTarget.style.color = isError ? "#dc2626" : isSuccess ? "var(--accent)" : disabled ? "var(--text-dim)" : "var(--text-muted)";
+                event.currentTarget.style.color = isError ? "var(--palette-red-600)" : isSuccess ? "var(--accent)" : disabled ? "var(--text-dim)" : "var(--text-muted)";
                 event.currentTarget.style.background = "none";
               }}
               data-mobile-toolbar-action={mobile ? "name" : undefined}
@@ -1401,15 +1427,15 @@ export function AppShell() {
             aria-pressed={activeTopPanel === "agents"}
             style={{
               position: "relative",
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--space-1-5)",
               width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
               height: "100%", padding: mobile ? 0 : "0 12px",
               background: activeTopPanel === "agents" ? "var(--bg-selected)" : "none",
               border: "none",
               borderTop: activeTopPanel === "agents" ? "2px solid var(--accent)" : "2px solid transparent",
-              borderRight: "1px solid var(--border)",
+              borderRight: "var(--border-width) solid var(--border)",
               color: activeTopPanel === "agents" ? "var(--text)" : "var(--text-muted)",
-              cursor: "pointer", flexShrink: 0, fontSize: 11, whiteSpace: "nowrap",
+              cursor: "pointer", flexShrink: 0, fontSize: "var(--font-size-meta)", whiteSpace: "nowrap",
               transition: "color 0.1s, background 0.1s",
             }}
             data-mobile-toolbar-action={mobile ? "agents" : undefined}
@@ -1421,10 +1447,10 @@ export function AppShell() {
             <span
               aria-hidden="true"
               style={{
-                minWidth: 15, height: 15, padding: "0 4px", display: "grid", placeItems: "center",
-                borderRadius: 7, background: "var(--bg-selected)", color: "var(--accent)",
-                fontSize: 10, lineHeight: 1, fontVariantNumeric: "tabular-nums",
-                ...(mobile ? { position: "absolute", top: 2, right: 2, minWidth: 13, height: 13, padding: "0 3px", fontSize: 9 } : {}),
+                minWidth: 15, height: 15, padding: "0 var(--space-1)", display: "grid", placeItems: "center",
+                borderRadius: "var(--radius-menu)", background: "var(--bg-selected)", color: "var(--accent)",
+                fontSize: "var(--font-size-caption)", lineHeight: 1, fontVariantNumeric: "tabular-nums",
+                ...(mobile ? { position: "absolute", top: 2, right: 2, minWidth: 13, height: 13, padding: "0 3px", fontSize: "var(--font-size-micro)" } : {}),
               }}
             >
               {activeSessionFamily!.subagents.length}
@@ -1444,7 +1470,7 @@ export function AppShell() {
               background: activeTopPanel === "branches" ? "var(--bg-selected)" : "none",
               border: "none",
               borderTop: activeTopPanel === "branches" ? "2px solid var(--accent)" : "2px solid transparent",
-              borderRight: "1px solid var(--border)",
+              borderRight: "var(--border-width) solid var(--border)",
               color: activeTopPanel === "branches" ? "var(--text)" : "var(--text-muted)",
               cursor: "pointer", flexShrink: 0,
             }}
@@ -1478,17 +1504,17 @@ export function AppShell() {
           aria-label={translate("system.prompt")}
           aria-pressed={activeTopPanel === "system"}
           style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--space-1-5)",
             width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
             height: "100%", padding: mobile ? 0 : "0 12px",
             background: activeTopPanel === "system" ? "var(--bg-selected)" : "none",
             border: "none",
             borderTop: activeTopPanel === "system" ? "2px solid var(--accent)" : "2px solid transparent",
-            borderRight: "1px solid var(--border)",
+            borderRight: "var(--border-width) solid var(--border)",
             cursor: mobile && !showChat ? "not-allowed" : "pointer",
             color: activeTopPanel === "system" ? "var(--text)" : "var(--text-muted)",
             opacity: mobile && !showChat ? 0.45 : 1,
-            fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
+            fontSize: "var(--font-size-meta)", whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
           }}
           onMouseEnter={(event) => {
             if (mobile && !showChat) return;
@@ -1515,17 +1541,17 @@ export function AppShell() {
           aria-label={translate("tools.title")}
           aria-pressed={activeTopPanel === "tools"}
           style={{
-            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: "var(--space-1-5)",
             width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
             height: "100%", padding: mobile ? 0 : "0 12px",
             background: activeTopPanel === "tools" ? "var(--bg-selected)" : "none",
             border: "none",
             borderTop: activeTopPanel === "tools" ? "2px solid var(--accent)" : "2px solid transparent",
-            borderRight: "1px solid var(--border)",
+            borderRight: "var(--border-width) solid var(--border)",
             cursor: mobile && !showChat ? "not-allowed" : "pointer",
             color: activeTopPanel === "tools" ? "var(--text)" : "var(--text-muted)",
             opacity: mobile && !showChat ? 0.45 : 1,
-            fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
+            fontSize: "var(--font-size-meta)", whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
           }}
           onMouseEnter={(event) => {
             if (mobile && !showChat) return;
@@ -1562,8 +1588,8 @@ export function AppShell() {
     let mobileContextText: string | null = null;
     if (contextUsage?.contextWindow) {
       const percent = contextUsage.percent;
-      if (percent !== null && percent > 90) contextColor = "#ef4444";
-      else if (percent !== null && percent > 70) contextColor = "rgba(234,179,8,0.95)";
+      if (percent !== null && percent > 90) contextColor = "var(--palette-red-500)";
+      else if (percent !== null && percent > 70) contextColor = "rgba(var(--palette-yellow-500-rgb),0.95)";
       desktopContextText = percent !== null
         ? `${percent.toFixed(0)}% / ${formatCompact(contextUsage.contextWindow)}`
         : `? / ${formatCompact(contextUsage.contextWindow)}`;
@@ -1617,7 +1643,7 @@ export function AppShell() {
           background: activeTopPanel === "session" ? "var(--bg-selected)" : "none",
           border: "none",
           borderTop: activeTopPanel === "session" ? "2px solid var(--accent)" : "2px solid transparent",
-          fontSize: 11, color: "var(--text-muted)",
+          fontSize: "var(--font-size-meta)", color: "var(--text-muted)",
           whiteSpace: "nowrap", cursor: showChat ? "pointer" : "default",
           fontVariantNumeric: "tabular-nums",
           transition: "color 0.1s, background 0.1s",
@@ -1632,7 +1658,7 @@ export function AppShell() {
         {mobile ? (
           <>
             {tokens && tokens.input > 0 && (
-              <span className="mobile-session-stat-io" style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+              <span className="mobile-session-stat-io" style={{ display: "flex", alignItems: "center", gap: "var(--space-0-5)", flexShrink: 0 }}>
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
                 </svg>
@@ -1640,7 +1666,7 @@ export function AppShell() {
               </span>
             )}
             {tokens && tokens.output > 0 && (
-              <span className="mobile-session-stat-io" style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+              <span className="mobile-session-stat-io" style={{ display: "flex", alignItems: "center", gap: "var(--space-0-5)", flexShrink: 0 }}>
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
                 </svg>
@@ -1666,7 +1692,7 @@ export function AppShell() {
         ) : (
           <>
             {tokens && tokens.input > 0 && (
-              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ display: "flex", alignItems: "center", gap: "var(--space-1)" }}>
                 <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
                 </svg>
@@ -1674,7 +1700,7 @@ export function AppShell() {
               </span>
             )}
             {tokens && tokens.output > 0 && (
-              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ display: "flex", alignItems: "center", gap: "var(--space-1)" }}>
                 <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
                 </svg>
@@ -1682,7 +1708,7 @@ export function AppShell() {
               </span>
             )}
             {tokens && tokens.cacheRead > 0 && (
-              <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ display: "flex", alignItems: "center", gap: "var(--space-1)" }}>
                 <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
                 </svg>
@@ -1695,7 +1721,7 @@ export function AppShell() {
               </span>
             )}
             {desktopContextText && (
-              <span style={{ display: "flex", alignItems: "center", gap: 4, color: contextColor }}>
+              <span style={{ display: "flex", alignItems: "center", gap: "var(--space-1)", color: contextColor }}>
                 <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M1 9 L1 5 Q1 1 5 1 Q9 1 9 5 L9 9" /><line x1="1" y1="9" x2="9" y2="9" />
                 </svg>
@@ -1729,9 +1755,9 @@ export function AppShell() {
           visibility: covered ? "hidden" : "visible",
           pointerEvents: covered ? "none" : "auto",
           background: rightPanelOpen ? "var(--bg-selected)" : "none",
-          border: "none", borderLeft: "1px solid var(--border)",
+          border: "none", borderLeft: "var(--border-width) solid var(--border)",
           color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-          cursor: "pointer", flexShrink: 0, transition: "color 0.12s, background 0.12s",
+          cursor: "pointer", flexShrink: 0, transition: "color var(--duration-fast), background var(--duration-fast)",
         }}
         onMouseEnter={(event) => { if (!covered) event.currentTarget.style.color = "var(--text)"; }}
         onMouseLeave={(event) => { event.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
@@ -1742,8 +1768,6 @@ export function AppShell() {
       </button>
     );
   };
-
-  if (tenantRole === "member" && hostAccess === false) return <CompanionShell />;
 
   return (
     <>
@@ -1863,7 +1887,7 @@ export function AppShell() {
         style={{
           "--sidebar-width": `${sidebarResizer.width}px`,
           background: "var(--bg-panel)",
-          borderRight: "1px solid var(--border)",
+          borderRight: "var(--border-width) solid var(--border)",
           display: "flex",
           flexDirection: "column",
           flexShrink: 0,
@@ -1888,7 +1912,7 @@ export function AppShell() {
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ flexShrink: 0, background: "var(--bg-panel)" }}>
-        <div style={{ display: "flex", alignItems: "center", position: "relative", borderBottom: "1px solid var(--border)", height: "calc(36px + env(safe-area-inset-top))", paddingTop: "env(safe-area-inset-top)" }}>
+        <div style={{ display: "flex", alignItems: "center", position: "relative", borderBottom: "var(--border-width) solid var(--border)", height: "calc(36px + env(safe-area-inset-top))", paddingTop: "env(safe-area-inset-top)" }}>
           <button
             onClick={handleSidebarToggle}
              title={sidebarOpen ? translate("sidebar.hide") : translate("sidebar.show")}
@@ -1896,8 +1920,8 @@ export function AppShell() {
             style={{
               display: "flex", alignItems: "center", justifyContent: "center",
               width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
+              background: "none", border: "none", borderRight: "var(--border-width) solid var(--border)",
+              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color var(--duration-fast)",
             }}
             onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
@@ -1940,9 +1964,9 @@ export function AppShell() {
                     display: "flex", alignItems: "center", justifyContent: "center",
                     width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
                     background: mobileToolbarMoreOpen ? "var(--bg-selected)" : "none",
-                    border: "none", borderRight: "1px solid var(--border)",
+                    border: "none", borderRight: "var(--border-width) solid var(--border)",
                     color: mobileToolbarMoreOpen ? "var(--text)" : "var(--text-muted)",
-                    cursor: "pointer", flexShrink: 0, transition: "color 0.12s, background 0.12s",
+                    cursor: "pointer", flexShrink: 0, transition: "color var(--duration-fast), background var(--duration-fast)",
                   }}
                 >
                   {mobileToolbarMoreOpen ? (
@@ -2043,9 +2067,9 @@ export function AppShell() {
               {activeTopPanel === "session" && (
                 <div className="session-info-popover" style={{
                   background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
+                  borderBottom: "var(--border-width) solid var(--border)",
                   boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
-                  padding: "12px 16px",
+                  padding: "var(--space-3) var(--space-4)",
                 }}>
                   {sessionStats ? (() => {
                     const formatDuration = (ms: number) => {
@@ -2102,12 +2126,12 @@ export function AppShell() {
                       compact = false,
                     ) => (
                         <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{title}</div>
+                          <div style={{ fontSize: "var(--font-size-meta)", fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{title}</div>
                           <div style={{
                             display: "grid",
                             gridTemplateColumns: compact ? "max-content max-content" : "auto minmax(0, 1fr)",
                             columnGap: compact ? 14 : 12,
-                            rowGap: 4,
+                            rowGap: "var(--space-1)",
                             justifyContent: compact ? "start" : undefined,
                           }}>
                             {sectionRows.map(([label, value]) => (
@@ -2149,11 +2173,11 @@ export function AppShell() {
                             marginTop: -2,
                             color: copied ? "var(--accent)" : "var(--text-dim)",
                             background: "transparent",
-                            border: "1px solid var(--border)",
-                            borderRadius: 4,
+                            border: "var(--border-width) solid var(--border)",
+                            borderRadius: "var(--radius-sm)",
                             cursor: "pointer",
                             flex: "0 0 auto",
-                            transition: "color 0.12s, border-color 0.12s, background 0.12s",
+                            transition: "color var(--duration-fast), border-color var(--duration-fast), background var(--duration-fast)",
                           }}
                           onMouseEnter={(e) => {
                             e.currentTarget.style.color = "var(--accent)";
@@ -2181,8 +2205,8 @@ export function AppShell() {
                     };
                     const sessionInfoSection = (
                       <div style={{ minWidth: 0 }}>
-                         <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{translate("session.infoSection")}</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
+                         <div style={{ fontSize: "var(--font-size-meta)", fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{translate("session.infoSection")}</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: "var(--space-3)", rowGap: "var(--space-2)", alignItems: "start" }}>
                           {sessionRows.map((row) => (
                             <div key={`session-info:${row.label}`} style={{ display: "contents" }}>
                               <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{row.label}</div>
@@ -2201,8 +2225,8 @@ export function AppShell() {
                     );
                     const projectInfoSection = projectRows.length > 0 ? (
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{translate("session.projectSection")}</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
+                        <div style={{ fontSize: "var(--font-size-meta)", fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{translate("session.projectSection")}</div>
+                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: "var(--space-3)", rowGap: "var(--space-2)", alignItems: "start" }}>
                           {projectRows.map((row) => (
                             <div key={`project-info:${row.label}`} style={{ display: "contents" }}>
                               <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{row.label}</div>
@@ -2227,7 +2251,7 @@ export function AppShell() {
                           ? "1fr"
                           : "minmax(360px, 1.7fr) minmax(140px, 0.55fr) minmax(190px, 0.75fr)",
                         gap: isMobile ? 16 : 24,
-                        fontSize: 12,
+                        fontSize: "var(--font-size-control)",
                         lineHeight: 1.5,
                         fontFamily: "var(--font-mono)",
                       }}>
@@ -2240,7 +2264,7 @@ export function AppShell() {
                       </div>
                     );
                   })() : (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                    <div style={{ fontSize: "var(--font-size-control)", color: "var(--text-muted)", fontStyle: "italic" }}>
                        {translate("session.load")}
                     </div>
                   )}
@@ -2259,6 +2283,9 @@ export function AppShell() {
             <ChatWindow
               key={sessionKey}
               session={selectedSession}
+              tenantWorkspaceOnly={hostAccess !== true}
+              conversationMode={conversationMode}
+              onConversationModeChange={setConversationMode}
               searchTarget={searchTarget?.sessionId === selectedSession?.id ? searchTarget : null}
               onSearchTargetHandled={handleSearchTargetHandled}
               initialScrollPosition={selectedSession ? sessionScrollPositionsRef.current.get(selectedSession.id) ?? null : null}
@@ -2270,6 +2297,7 @@ export function AppShell() {
               onAttentionNeeded={handleAttentionNeeded}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
+              onSessionAccessLost={handleSessionAccessLost}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
               onBranchDataChange={handleBranchDataChange}
@@ -2293,37 +2321,37 @@ export function AppShell() {
           ) : initialCwdStatus === "validating" ? (
             <div
               role="status"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
+              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "var(--space-2)", padding: 24, color: "var(--text-muted)", textAlign: "center" }}
             >
-               <div style={{ fontSize: 14, color: "var(--text)" }}>{translate("workspace.opening")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+               <div style={{ fontSize: "var(--font-size-body)", color: "var(--text)" }}>{translate("workspace.opening")}</div>
+              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: "var(--font-size-control)" }}>
                 {initialNavigation.requestedCwd}
               </div>
             </div>
           ) : initialCwdStatus === "error" ? (
             <div
               role="alert"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
+              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "var(--space-2)", padding: 24, color: "var(--text-muted)", textAlign: "center" }}
             >
-               <div style={{ fontSize: 14, color: "#dc2626" }}>{translate("workspace.unable")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
+               <div style={{ fontSize: "var(--font-size-body)", color: "var(--palette-red-600)" }}>{translate("workspace.unable")}</div>
+              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: "var(--font-size-control)" }}>
                 {initialNavigation.requestedCwd}
               </div>
-              <div style={{ maxWidth: 720, fontSize: 12 }}>{initialCwdError}</div>
+              <div style={{ maxWidth: 720, fontSize: "var(--font-size-control)" }}>{initialCwdError}</div>
             </div>
           ) : showPlaceholder ? (
             activeCwd ? (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 15 }}>
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--font-size-title)" }}>
                  {translate("workspace.selectSession")}
               </div>
             ) : (
-              <div style={{ position: "absolute", top: 12, left: 12, display: "flex", alignItems: "flex-start", gap: 8, userSelect: "none", pointerEvents: "none" }}>
+              <div style={{ position: "absolute", top: 12, left: 12, display: "flex", alignItems: "flex-start", gap: "var(--space-2)", userSelect: "none", pointerEvents: "none" }}>
                 <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7, flexShrink: 0 }}>
                   <line x1="20" y1="12" x2="4" y2="12" /><polyline points="10 6 4 12 10 18" />
                 </svg>
                 <div>
-                   <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>{translate("workspace.getStarted")}</div>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.8 }}>
+                   <div style={{ fontSize: "var(--font-size-heading)", fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>{translate("workspace.getStarted")}</div>
+                  <div style={{ fontSize: "var(--font-size-control)", color: "var(--text-muted)", lineHeight: 1.8 }}>
                      <span style={{ color: "var(--text-dim)", marginRight: 6 }}>1.</span>{translate("workspace.selectProject")}<br />
                      <span style={{ color: "var(--text-dim)", marginRight: 6 }}>2.</span>{translate("workspace.addModels")}
                   </div>
@@ -2358,7 +2386,7 @@ export function AppShell() {
           "--right-panel-width": `${rightPanelResizer.width}px`,
           display: "flex",
           flexDirection: "column",
-          borderLeft: "1px solid var(--border)",
+          borderLeft: "var(--border-width) solid var(--border)",
           background: "var(--bg)",
         } as React.CSSProperties}
       >
@@ -2370,7 +2398,7 @@ export function AppShell() {
           height: "calc(36px + env(safe-area-inset-top))",
           paddingTop: "env(safe-area-inset-top)",
           background: "var(--bg-panel)",
-          borderBottom: "1px solid var(--border)",
+          borderBottom: "var(--border-width) solid var(--border)",
         }}>
           <div style={{ flex: 1, overflow: "hidden" }}>
             <TabBar
@@ -2390,8 +2418,8 @@ export function AppShell() {
             style={{
               display: "flex", alignItems: "center", justifyContent: "center",
               width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
-              background: "var(--bg-selected)", border: "none", borderLeft: "1px solid var(--border)",
-              color: "var(--text)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
+              background: "var(--bg-selected)", border: "none", borderLeft: "var(--border-width) solid var(--border)",
+              color: "var(--text)", cursor: "pointer", flexShrink: 0, transition: "color var(--duration-fast)",
             }}
             onMouseEnter={(event) => { event.currentTarget.style.color = "var(--accent)"; }}
             onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text)"; }}
@@ -2428,11 +2456,11 @@ export function AppShell() {
               )}
             />
           ) : !terminalTabs.some((tab) => tab.id === activeFileTabId) ? (
-            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
+            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: "var(--font-size-control)" }}>
                {translate("files.noneOpen")}
             </div>
           ) : null}
-          {terminalTabs.map((tab) => (
+          {hostAccess && terminalTabs.map((tab) => (
             <div key={tab.id} hidden={tab.id !== activeFileTabId} style={{ width: "100%", height: "100%" }}>
               <TerminalPanel
                 tab={tab}
@@ -2450,6 +2478,7 @@ export function AppShell() {
       <SettingsPanel
         cwd={projectTrustCwd}
         sessionId={selectedSession?.id ?? null}
+        hostAccess={hostAccess === true}
         initialSection={settingsSection}
         quoteSelectionEnabled={quoteSelectionEnabled}
         onQuoteSelectionChange={handleQuoteSelectionChange}

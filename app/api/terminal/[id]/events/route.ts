@@ -1,4 +1,5 @@
-import { hasTerminal, subscribeTerminal, type TerminalEvent } from "@/lib/terminal-manager";
+import { getTerminalTenantId, hasTerminal, subscribeTerminal, type TerminalEvent } from "@/lib/terminal-manager";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -8,6 +9,10 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  const session = requireTenantSession(req);
+  if (!canManageHostConfiguration(session) || getTerminalTenantId(id) !== session.tenant.id) {
+    return new Response("Terminal not found", { status: 404 });
+  }
   if (!hasTerminal(id)) return new Response("Terminal not found", { status: 404 });
   const cursor = req.headers.get("last-event-id") ?? new URL(req.url).searchParams.get("after");
   const after = cursor !== null && /^\d+$/.test(cursor) && Number.isSafeInteger(Number(cursor))

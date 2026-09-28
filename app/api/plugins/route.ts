@@ -12,6 +12,7 @@ import {
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import { getProjectTrustStatus } from "@/lib/project-trust";
+import { hasHostConfigurationAccess } from "@/lib/tenant-auth";
 import { isPluginSourceCheckable } from "@/lib/plugin-updates";
 import type {
   PluginDiagnostic,
@@ -298,6 +299,7 @@ function readScope(scope: unknown): PluginScope {
 }
 
 export async function GET(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Plugin management is unavailable to this account" }, { status: 403 });
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
   if (!cwd) return NextResponse.json({ error: "cwd required" }, { status: 400 });
@@ -315,6 +317,7 @@ export async function GET(req: Request) {
 
 // POST /api/plugins body: { action, source?, scope?, cwd }
 export async function POST(req: Request) {
+  if (!hasHostConfigurationAccess(req)) return NextResponse.json({ error: "Plugin management is unavailable to this account" }, { status: 403 });
   if (!isApiRequestAllowed(req)) {
     return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
   }

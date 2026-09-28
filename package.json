@@ -29,7 +29,7 @@
   ],
   "scripts": {
     "postinstall": "node bin/prepare-terminal.js",
-    "dev": "next dev -H 127.0.0.1 -p 30141",
+    "dev": "next dev -H 0.0.0.0 -p 30141",
     "dev:lan": "next dev -H 0.0.0.0 -p 30141",
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30141",
@@ -49,6 +49,7 @@
     "@xterm/xterm": "6.0.0",
     "ansi_up": "^6.0.6",
     "js-yaml": "^5.2.3",
+    "jszip": "^3.10.1",
     "next": "16.3.1",
     "node-pty": "1.2.0-beta.15",
     "proper-lockfile": "4.1.2",

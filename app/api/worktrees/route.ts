@@ -1,13 +1,19 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject } from "@/lib/worktree";
-import { allowFileRoot, getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
+import { isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
+import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
+import { getTenantStore } from "@/lib/tenant-store";
+import { tenantWorkspaceRootsForRequest } from "@/lib/tenant-agent-runtime";
 
 /** Same gate as /api/files: only session cwds / project roots / explicitly
  *  allowed dirs may be inspected or mutated through this endpoint. */
-async function checkCwdAllowed(cwd: string): Promise<NextResponse | null> {
-  const allowedRoots = await getAllowedFileRoots();
+async function checkCwdAllowed(request: Request, cwd: string): Promise<NextResponse | null> {
+  if (!canManageHostConfiguration(requireTenantSession(request))) {
+    return NextResponse.json({ error: "Worktrees are unavailable to tenant members" }, { status: 403 });
+  }
+  const allowedRoots = new Set(tenantWorkspaceRootsForRequest(request));
   if (!isFilePathAllowed(cwd, allowedRoots) || !isExistingFilePathAllowed(cwd, allowedRoots)) {
     return NextResponse.json({ error: "Access denied" }, { status: 403 });
   }
@@ -21,7 +27,7 @@ export async function GET(req: Request) {
     if (!cwd) {
       return NextResponse.json({ error: "cwd is required" }, { status: 400 });
     }
-    const denied = await checkCwdAllowed(cwd);
+    const denied = await checkCwdAllowed(req, cwd);
     if (denied) return denied;
 
     const project = await resolveProject(cwd);
@@ -39,7 +45,11 @@ export async function GET(req: Request) {
     // Every listed path is a git-verified worktree of this project; allow the
     // file explorer to browse them even before they have any session (the
     // in-memory allowlist from addWorktree does not survive server restarts).
-    for (const w of worktrees) allowFileRoot(w.path);
+    const session = requireTenantSession(req);
+    const context = { tenantId: session.tenant.id, membershipId: session.membership.id };
+    for (const w of worktrees) {
+      getTenantStore().ensureWorkspace(context, { name: w.branch || "Worktree", rootPath: w.path });
+    }
     return NextResponse.json({
       projectRoot: project.projectRoot,
       projectKey: projectIdentityKey(project.projectRoot),
@@ -63,13 +73,18 @@ export async function POST(req: Request) {
     if (!body.branch || typeof body.branch !== "string") {
       return NextResponse.json({ error: "branch is required" }, { status: 400 });
     }
-    const denied = await checkCwdAllowed(body.cwd);
+    const denied = await checkCwdAllowed(req, body.cwd);
     if (denied) return denied;
     if (!existsSync(body.cwd)) {
       return NextResponse.json({ error: `Directory does not exist: ${body.cwd}` }, { status: 400 });
     }
 
     const result = await addWorktree(body.cwd, body.branch);
+    const session = requireTenantSession(req);
+    getTenantStore().ensureWorkspace(
+      { tenantId: session.tenant.id, membershipId: session.membership.id },
+      { name: result.branch || body.branch, rootPath: result.path },
+    );
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -87,10 +102,15 @@ export async function DELETE(req: Request) {
     if (!body.path || typeof body.path !== "string") {
       return NextResponse.json({ error: "path is required" }, { status: 400 });
     }
-    const denied = await checkCwdAllowed(body.cwd);
+    const denied = await checkCwdAllowed(req, body.cwd);
     if (denied) return denied;
 
     await removeWorktree(body.cwd, body.path, body.force === true);
+    const session = requireTenantSession(req);
+    getTenantStore().archiveWorkspaceByRoot(
+      { tenantId: session.tenant.id, membershipId: session.membership.id },
+      body.path,
+    );
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

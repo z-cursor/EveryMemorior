@@ -42,7 +42,13 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   // Session data and live agent traffic must always come from the local server.
-  if (url.pathname.startsWith("/api/") || url.pathname === "/sw.js") return;
+  // Next.js owns its chunk caching. Intercepting these URLs can pair a stale
+  // Turbopack chunk with a fresh module graph after a development restart.
+  if (
+    url.pathname.startsWith("/api/") ||
+    url.pathname.startsWith("/_next/") ||
+    url.pathname === "/sw.js"
+  ) return;
 
   if (request.mode === "navigate") {
     event.respondWith(
@@ -54,9 +60,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  const isStaticAsset =
-    url.pathname.startsWith("/_next/static/") ||
-    PRECACHE_URLS.includes(url.pathname);
+  const isStaticAsset = PRECACHE_URLS.includes(url.pathname);
 
   if (isStaticAsset) {
     event.respondWith(cacheFirst(request));

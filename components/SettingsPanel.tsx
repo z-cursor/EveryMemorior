@@ -30,11 +30,14 @@ import { SkillsConfig } from "./SkillsConfig";
 import { AgentsConfig } from "./AgentsConfig";
 import { PluginsConfig } from "./PluginsConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
+import { TenantSettings } from "./TenantSettings";
 import { CompanionGovernanceSettings } from "./CompanionGovernanceSettings";
+import "@/app/companion-admin.css";
 
 interface Props {
   cwd: string | null;
   sessionId: string | null;
+  hostAccess: boolean;
   initialSection: SettingsSection;
   onClose: () => void;
   onSessionReloaded: () => void;
@@ -57,6 +60,7 @@ export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: {
   };
 
   if (section === "general") return <svg {...common}><path d="M20 7h-9M14 17H5" /><circle cx="7" cy="7" r="3" /><circle cx="17" cy="17" r="3" /></svg>;
+  if (section === "tenant") return <svg {...common}><circle cx="9" cy="8" r="3" /><path d="M3 20c0-4 2-7 6-7s6 3 6 7M16 5a3 3 0 0 1 0 6M17 13c3 1 4 3 4 7" /></svg>;
   if (section === "quality") return <svg {...common}><path d="M12 3 4 7v5c0 5 3 8 8 9 5-1 8-4 8-9V7l-8-4Z" /><path d="m9 12 2 2 4-4" /></svg>;
   if (section === "models") return <svg {...common}><rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3" /></svg>;
   if (section === "skills") return <svg {...common}><path d="m12 2-10 5 10 5 10-5-10-5Z" /><path d="m2 12 10 5 10-5M2 17l10 5 10-5" /></svg>;
@@ -352,20 +356,25 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   );
 }
 
-export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessionReloaded, quoteSelectionEnabled, onQuoteSelectionChange }: Props) {
+export function SettingsPanel({ cwd, sessionId, hostAccess, initialSection, onClose, onSessionReloaded, quoteSelectionEnabled, onQuoteSelectionChange }: Props) {
   const { t } = useI18n();
-  const [section, setSection] = useState<SettingsSection>(initialSection);
+  const permittedSections: SettingsSection[] = hostAccess
+    ? ["general", "tenant", "quality", "models", "skills", "agents", "plugins"]
+    : ["general", "tenant"];
+  const [section, setSection] = useState<SettingsSection>(permittedSections.includes(initialSection) ? initialSection : "general");
   const [mountedSections, setMountedSections] = useState<ReadonlySet<SettingsSection>>(
     () => new Set([section]),
   );
-  const sections: { id: SettingsSection; label: string; requiresProject: boolean }[] = [
+  const allSections: { id: SettingsSection; label: string; requiresProject: boolean }[] = [
     { id: "general", label: t("settings.general"), requiresProject: false },
+    { id: "tenant", label: t("settings.tenant"), requiresProject: false },
     { id: "quality", label: t("settings.quality"), requiresProject: false },
     { id: "models", label: t("common.models"), requiresProject: false },
     { id: "skills", label: t("common.skills"), requiresProject: true },
     { id: "agents", label: t("common.agents"), requiresProject: true },
     { id: "plugins", label: t("common.plugins"), requiresProject: true },
   ];
+  const sections = allSections.filter((item) => permittedSections.includes(item.id));
 
   useEffect(() => setLastSettingsSection(initialSection), [initialSection]);
 
@@ -450,7 +459,8 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
 
         <main className="settings-dialog-main">
           {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} />)}
-          {sectionHost("quality", <CompanionGovernanceSettings />)}
+          {sectionHost("tenant", <TenantSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} onOpenQuality={() => activateSection("quality")} />)}
+          {sectionHost("quality", <CompanionGovernanceSettings onOpenTeam={() => activateSection("tenant")} />)}
           {sectionHost("models", <ModelsConfig embedded onClose={onClose} />)}
           {cwd && sectionHost("skills", <SkillsConfig embedded key={cwd} cwd={cwd} onClose={onClose} />)}
           {cwd && sectionHost("agents", <AgentsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}

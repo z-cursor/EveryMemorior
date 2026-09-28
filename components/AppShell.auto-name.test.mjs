@@ -22,3 +22,14 @@ test("会话落盘后会用服务端记录清除临时状态", () => {
   assert.match(source, /\{ \.\.\.prev, \.\.\.full, transient: full\.transient \?\? false \}/);
   assert.match(source, /if \(selectedSession\) hydrateSelectedSession\(selectedSession\.id\)/);
 });
+
+test("旧租户会话不会从 URL 恢复", () => {
+  assert.match(source, /SessionSidebar only restores ids present in the current tenant's/);
+  assert.match(source, /router\.replace\(window\.location\.pathname, \{ scroll: false \}\)/);
+});
+
+test("会话失去租户权限时会卸载并停止重试", () => {
+  assert.match(source, /onSessionAccessLost=\{handleSessionAccessLost\}/);
+  assert.match(source, /setSelectedSession\(null\)/);
+  assert.match(source, /setSessionKey\(\(k\) => k \+ 1\)/);
+});

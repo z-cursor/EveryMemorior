@@ -13,13 +13,10 @@ const enSource = await readFile(new URL("../lib/i18n/messages/en.ts", import.met
 const zhSource = await readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8");
 const loginSource = await readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8");
 
-test("opens one settings panel from direct sidebar shortcuts", () => {
+test("opens one settings panel from the sidebar account menu", () => {
   assert.match(shellSource, /<SettingsPanel/);
-  assert.match(shellSource, /setSettingsSection\(section\)/);
+  assert.match(shellSource, /<AccountMenu[^>]*onOpenSettings=\{setSettingsSection\}/);
   assert.match(shellSource, /initialSection=\{settingsSection\}/);
-  assert.match(shellSource, /translate\("common\.settings"\)/);
-  assert.match(shellSource, /<SettingsSectionIcon section=\{section\} size=\{14\} strokeWidth=\{2\} \/>\s*<span>\{label\}<\/span>/);
-  assert.match(shellSource, /<SettingsSectionIcon section="general" size=\{14\} strokeWidth=\{2\} \/>/);
   assert.doesNotMatch(shellSource, /\["plugins", translate\("common\.plugins"\)\]/);
   assert.doesNotMatch(shellSource, /setModelsConfigOpen|setSkillsConfigOpen|setAgentsConfigOpen|setPluginsConfigOpen/);
 });
@@ -34,7 +31,6 @@ test("keeps every requested configuration surface inside the settings panel", ()
 });
 
 test("restores the settings section and each list detail selection", async () => {
-  assert.match(shellSource, /getLastSettingsSection\(projectTrustCwd\)/);
   assert.match(panelSource, /setLastSettingsSection\(initialSection\)/);
   assert.match(panelSource, /setLastSettingsSection\(nextSection\)/);
   for (const name of ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"]) {
@@ -88,7 +84,7 @@ test("groups chat display controls together without row backgrounds", () => {
   }
   assert.doesNotMatch(panelSource, /ThinkingIcon|settings-thinking-/);
   const chatOptionStyles = cssSource.match(/\.settings-chat-option \{[\s\S]*?\}/)?.[0] ?? "";
-  assert.match(chatOptionStyles, /font-size: 12px/);
+  assert.match(chatOptionStyles, /font-size: var\(--font-size-control\)/);
   assert.doesNotMatch(chatOptionStyles, /background/);
 });
 
@@ -137,13 +133,25 @@ test("uses the compact controls glyph for General", () => {
   assert.match(panelSource, /section === "general"[\s\S]*?<path d="M20 7h-9M14 17H5" \/>[\s\S]*?<circle cx="7" cy="7" r="3" \/>[\s\S]*?<circle cx="17" cy="17" r="3" \/>/);
 });
 
-test("keeps password authentication to one login field and one settings action", () => {
+test("supports first-use tenant setup, account login, and logout", async () => {
+  const accountMenuSource = await readFile(new URL("./AccountMenu.tsx", import.meta.url), "utf8");
   assert.equal((loginSource.match(/type="password"/g) ?? []).length, 1);
-  assert.doesNotMatch(loginSource, /type="(?:text|email)"/);
-  assert.match(loginSource, /autoComplete="current-password"/);
+  assert.match(loginSource, /type="email"/);
+  assert.match(loginSource, /inviteToken \? "accept-invitation" : setupRequired \? "setup" : "login"/);
+  assert.match(loginSource, /autoComplete=\{setupRequired \|\| inviteToken \? "new-password" : "current-password"\}/);
   assert.match(loginSource, /!destination\.startsWith\("\/\/"\)/);
   assert.match(panelSource, /fetch\("\/api\/web-auth", \{ method: "DELETE" \}\)/);
   assert.match(panelSource, /t\("auth\.logOut"\)/);
-  assert.match(loginSource, /className="web-login-composer"[\s\S]*?type="password"[\s\S]*?<button type="submit"/);
-  assert.match(globalCssSource, /\.web-login-composer \{[\s\S]*?display: flex;[\s\S]*?border-radius: 14px/);
+  assert.match(accountMenuSource, /onOpenSettings\("skills"\)/);
+  assert.match(accountMenuSource, /onOpenSettings\("tenant"\)/);
+  assert.match(globalCssSource, /\.tenant-login-page \{/);
+});
+
+test("tenant settings exposes organization switching, creation, invitations, and role changes", async () => {
+  const tenantSource = await readFile(new URL("./TenantSettings.tsx", import.meta.url), "utf8");
+  assert.match(tenantSource, /action: "switch-organization"/);
+  assert.match(tenantSource, /action: "create-organization"/);
+  assert.match(tenantSource, /method: "PATCH"/);
+  assert.match(tenantSource, /method: "DELETE"/);
+  assert.match(tenantSource, /邀请成员/);
 });

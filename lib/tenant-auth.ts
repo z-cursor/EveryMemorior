@@ -42,6 +42,14 @@ async function passwordMatches(password: string, stored: string): Promise<boolea
   return timingSafeEqual(actual, Buffer.from(keyHex, "hex"));
 }
 
+async function verifyPasswordLogin(email: string, password: string): Promise<{ userId: string }> {
+  const credential = getTenantStore().findPasswordCredential(email);
+  const valid = credential?.algorithm === PASSWORD_ALGORITHM
+    && await passwordMatches(password, credential.hash);
+  if (!credential || !valid) throw new TenantAuthenticationError("Invalid email or password", 401);
+  return { userId: credential.userId };
+}
+
 function tokenHash(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
@@ -95,19 +103,25 @@ export async function loginTenantUser(input: {
   tenantId?: string;
 }): Promise<{ token: string; session: AuthenticatedTenantSession }> {
   const store = getTenantStore();
-  const credential = store.findPasswordCredential(input.email);
-  const valid = credential?.algorithm === PASSWORD_ALGORITHM
-    && await passwordMatches(input.password, credential.hash);
-  if (!credential || !valid) throw new TenantAuthenticationError("Invalid email or password", 401);
-  const organizations = store.listUserTenants(credential.userId).filter((item) => item.status === "active");
+  const { userId } = await verifyPasswordLogin(input.email, input.password);
+  const organizations = store.listUserTenants(userId).filter((item) => item.status === "active");
   if (!input.tenantId && organizations.length > 1) throw new TenantSelectionRequiredError(organizations);
-  const membership = store.listUserMemberships(credential.userId).find((item) =>
+  const membership = store.listUserMemberships(userId).find((item) =>
     item.status === "active" && (!input.tenantId || item.tenantId === input.tenantId));
   if (!membership) throw new TenantAuthenticationError("No active tenant membership", 403);
-  const auth = newSession(credential.userId, membership.tenantId, membership.id);
+  const auth = newSession(userId, membership.tenantId, membership.id);
   const session = resolveTenantSession(auth.token);
   if (!session) throw new Error("Created authentication session could not be resolved");
   return { token: auth.token, session };
+}
+
+/** Verify credentials without creating a browser session, for the login org picker. */
+export async function getTenantLoginOptions(input: {
+  email: string;
+  password: string;
+}): Promise<UserTenantMembership[]> {
+  const { userId } = await verifyPasswordLogin(input.email, input.password);
+  return getTenantStore().listUserTenants(userId).filter((item) => item.status === "active");
 }
 
 export async function acceptTenantInvitation(input: {
@@ -203,6 +217,11 @@ export function canManageHostConfiguration(session: AuthenticatedTenantSession):
   return store.getPrimaryTenantId() === session.tenant.id
     && store.getInstallationOwnerMembershipId() === session.membership.id
     && session.membership.role === "owner";
+}
+
+/** Fail closed for host-wide configuration APIs. */
+export function hasHostConfigurationAccess(request: Request): boolean {
+  try { return canManageHostConfiguration(requireTenantSession(request)); } catch { return false; }
 }
 
 export function logoutTenantSession(token: string | undefined): void {

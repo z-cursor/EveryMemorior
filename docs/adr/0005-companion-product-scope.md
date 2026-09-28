@@ -1,0 +1,3 @@
+# Make companion chat the default member experience
+
+Ordinary tenant members enter a dedicated older-adult-friendly companion shell after login, while administrators, developers, and coding users keep the existing workspace experience. The shell exposes one continuous text relationship with 凡小忆, plus only necessary history, profile, display, and privacy controls; it hides projects, files, terminals, models, thinking levels, tools, agents, and system prompts. The UI always identifies 凡小忆 as AI, defaults to respectful “您”, follows explicit address and language preferences, and may have a stable style and gentle opinions without inventing a human body, family, biography, or lived experience. Phase one does not include unsolicited outreach or voice.

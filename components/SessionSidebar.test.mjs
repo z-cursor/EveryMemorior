@@ -62,6 +62,12 @@ test("exposes the loaded session catalog to the shell", () => {
   assert.match(source, /onSessionsChange\?\.\(allSessions\)/);
 });
 
+test("offers each signed-in member their companion chat before its first message", () => {
+  const companionRow = source.slice(source.indexOf("<SessionSearch open="), source.indexOf("{!loading && !error && sessionFamilies.length === 0"));
+  assert.match(companionRow, /onSelectCompanion\?\.\(selectedCwd \?\? selectedCwdProp \?\? homeDir\)/);
+  assert.doesNotMatch(companionRow, /hasCompanionConversation/);
+});
+
 test("subagent completion stays silent and never becomes unread", () => {
   assert.match(source, /completionNotificationSuppressedSessionIds\?: string\[\]/);
   assert.match(
@@ -113,7 +119,8 @@ test("lifecycle refreshes bypass the cache while cross-window polling reuses it"
   assert.match(source, /cache: "no-store"/);
   assert.match(source, /loadSessions\(isFirst, !isFirst\)/);
   assert.match(source, /data\.sessionListVersion !== sessionListVersionRef\.current[\s\S]*?await loadSessions\(\)/);
-  assert.doesNotMatch(source, /sessionRefreshDone|sessionRefreshTimerRef|title=\{t\("sidebar\.refresh"\)\}/);
+  assert.doesNotMatch(source, /sessionRefreshDone|sessionRefreshTimerRef/);
+  assert.match(source, /onClick=\{\(\) => void loadSessions\(false, true\)\}[\s\S]*?title=\{t\("sidebar\.refresh"\)\}/);
   assert.match(source, /loadSessions\(false, true\);[\s\S]*?onBackgroundTaskDone/);
 });
 

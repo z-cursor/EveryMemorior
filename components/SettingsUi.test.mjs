@@ -15,6 +15,24 @@ const configSources = await Promise.all(
   ]),
 );
 
+test("visual tokens preserve the current UI scale and compatibility aliases", () => {
+  for (const declaration of [
+    "--font-size-control: 12px;",
+    "--font-size-body: 14px;",
+    "--space-2: 8px;",
+    "--space-4: 16px;",
+    "--radius-item: 5px;",
+    "--radius-control: 6px;",
+    "--radius-panel: 8px;",
+    "--duration-normal: 150ms;",
+  ]) {
+    assert.ok(globalCssSource.includes(declaration), declaration);
+  }
+  assert.match(globalCssSource, /--bg: var\(--surface-canvas\)/);
+  assert.match(globalCssSource, /--text: var\(--content-primary\)/);
+  assert.match(globalCssSource, /--accent: var\(--action-primary\)/);
+});
+
 test("provides one template for config layout and controls", () => {
   for (const primitive of [
     "ConfigPanelShell",
@@ -43,9 +61,9 @@ test("provides one template for config layout and controls", () => {
   assert.match(templateSource, /className="config-sidebar"/);
   assert.match(templateSource, /className="config-detail"/);
   assert.match(cssSource, /\.config-sidebar \{[\s\S]*?width: 240px/);
-  assert.match(cssSource, /\.config-detail \{[\s\S]*?padding: 20px/);
+  assert.match(cssSource, /\.config-detail \{[\s\S]*?padding: var\(--space-5\)/);
   assert.match(cssSource, /@media \(max-width: 640px\)[\s\S]*?\.config-sidebar \{[\s\S]*?width: 100%/);
-  assert.match(cssSource, /@media \(max-width: 640px\)[\s\S]*?\.config-detail \{[\s\S]*?padding: 14px/);
+  assert.match(cssSource, /@media \(max-width: 640px\)[\s\S]*?\.config-detail \{[\s\S]*?padding: var\(--space-3-5\)/);
 });
 
 test("loads settings presentation from its dedicated stylesheet", () => {
@@ -66,8 +84,8 @@ test("all four settings sections use the shared list-detail layout", () => {
 
 test("all subpanel sidebars share one typography scale", () => {
   const sources = Object.fromEntries(configSources);
-  assert.match(cssSource, /\.config-sidebar-text \{[\s\S]*?font-family: inherit[\s\S]*?font-size: 12px/);
-  assert.match(cssSource, /\.config-sidebar-group-label \{[\s\S]*?font-family: inherit[\s\S]*?font-size: 10px/);
+  assert.match(cssSource, /\.config-sidebar-text \{[\s\S]*?font-family: inherit[\s\S]*?font-size: var\(--font-size-control\)/);
+  assert.match(cssSource, /\.config-sidebar-group-label \{[\s\S]*?font-family: inherit[\s\S]*?font-size: var\(--font-size-caption\)/);
   for (const source of Object.values(sources)) {
     assert.match(source, /<ConfigSidebarText/);
   }
@@ -89,7 +107,7 @@ test("skills and sub-agents share interactive sidebar rows", () => {
 });
 
 test("all shared config sidebar items use a fixed 30px height", () => {
-  assert.match(cssSource, /\.config-sidebar-item \{[\s\S]*?height: 30px[\s\S]*?padding: 0 8px/);
+  assert.match(cssSource, /\.config-sidebar-item \{[\s\S]*?height: 30px[\s\S]*?padding: 0 var\(--space-2\)/);
   assert.match(cssSource, /\.config-list-action-button \{[\s\S]*?height: 30px[\s\S]*?min-height: 30px/);
 });
 
@@ -114,10 +132,10 @@ test("skill scope group labels are localized", () => {
 
 test("all subpanel detail panes share one content hierarchy", () => {
   const sources = Object.fromEntries(configSources);
-  assert.match(cssSource, /\.config-detail-stack \{[\s\S]*?gap: 16px[\s\S]*?width: 100%/);
+  assert.match(cssSource, /\.config-detail-stack \{[\s\S]*?gap: var\(--space-4\)[\s\S]*?width: 100%/);
   assert.doesNotMatch(cssSource, /\.config-detail-stack \{[\s\S]*?max-width: 720px/);
-  assert.match(cssSource, /\.config-field-label \{[\s\S]*?font-size: 11px/);
-  assert.match(cssSource, /\.config-empty-state \{[\s\S]*?font-size: 12px/);
+  assert.match(cssSource, /\.config-field-label \{[\s\S]*?font-size: var\(--font-size-meta\)/);
+  assert.match(cssSource, /\.config-empty-state \{[\s\S]*?font-size: var\(--font-size-control\)/);
   for (const source of Object.values(sources)) {
     assert.match(source, /<ConfigDetailStack/);
     assert.match(source, /<ConfigEmptyState/);

@@ -1,6 +1,5 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import Image from "next/image";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
@@ -11,7 +10,8 @@ import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-fi
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, type AttachedImage, type ChatInputHandle } from "./ChatInput";
+import { CompanionShell, type CompanionController, type CompanionThinkingLevel } from "./CompanionShell";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
@@ -21,7 +21,7 @@ import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { AppUpdateResponse } from "@/lib/api-types";
-import type { ToolEntry } from "@/lib/tool-presets";
+import type { ToolEntry, ToolPreset } from "@/lib/tool-presets";
 import { findChatScrollAnchor, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import {
   captureScrollDistance,
@@ -34,6 +34,9 @@ import {
 
 interface Props {
   session: SessionInfo | null;
+  tenantWorkspaceOnly?: boolean;
+  conversationMode: "chat" | "work";
+  onConversationModeChange: (mode: "chat" | "work") => void;
   searchTarget?: { sessionId: string; entryId: string; blockIndex?: number } | null;
   onSearchTargetHandled?: (target: { sessionId: string; entryId: string }) => void;
   initialScrollPosition?: ChatScrollPosition | null;
@@ -45,6 +48,7 @@ interface Props {
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey: string) => void;
   onSessionForked?: (newSessionId: string) => void;
+  onSessionAccessLost?: () => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
@@ -132,15 +136,15 @@ function NewSessionUpdateLink({
         gap: 3,
         minHeight: 32,
         minWidth: 0,
-        padding: "0 4px",
+        padding: "0 var(--space-1)",
         background: "transparent",
-        borderRadius: 5,
+        borderRadius: "var(--radius-item)",
         color: "var(--accent)",
-        fontSize: 12,
+        fontSize: "var(--font-size-control)",
         fontWeight: 600,
         lineHeight: 1.2,
         textDecoration: "none",
-        transition: "background 0.12s",
+        transition: "background var(--duration-fast)",
         whiteSpace: "nowrap",
       }}
     >
@@ -211,20 +215,20 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
+          gap: "var(--space-2)",
           width: "auto",
           minHeight: 24,
-          padding: "2px 0",
+          padding: "var(--space-0-5) 0",
           border: "none",
           background: "transparent",
           color: "var(--text-muted)",
           cursor: "pointer",
-          fontSize: 12,
+          fontSize: "var(--font-size-control)",
           textAlign: "left",
         }}
         title={expanded ? t("chat.collapseProcess") : t("chat.expandProcess")}
       >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform var(--duration-normal)" }}>
           <polyline points="4 2.5 7.5 6 4 9.5" />
         </svg>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -240,7 +244,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
   );
 }
 
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
+export function ChatWindow({ session, tenantWorkspaceOnly, conversationMode, onConversationModeChange, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionAccessLost, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const completionNotificationsEnabled = session?.relation?.kind !== "subagent";
@@ -292,10 +296,41 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, scrollUserMsgToTop,
     loadContext, activeLeafId, scrollToBottom, scrollToMessage,
   } = useAgentSession({
-    session, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
+    session, tenantWorkspaceOnly, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, onSessionAccessLost,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
     deferInitialScroll: Boolean(pendingScrollRestore),
   });
+  const companionControllerRef = useRef<CompanionController | null>(null);
+  const [companionBusy, setCompanionBusy] = useState(false);
+  const [companionStarted, setCompanionStarted] = useState(false);
+  const [companionThinkingLevel, setCompanionThinkingLevel] = useState<CompanionThinkingLevel>("auto");
+  const [companionUnderstandingOpen, setCompanionUnderstandingOpen] = useState(false);
+  const [companionCompacting, setCompanionCompacting] = useState(false);
+  const [companionCompactError, setCompanionCompactError] = useState<string | null>(null);
+  // Legacy no-tool Agent sessions keep their own transcript in Chat mode.
+  const isCompanionChat = conversationMode === "chat" && !session?.chatOnly;
+  const registerCompanionController = useCallback((controller: CompanionController | null) => {
+    companionControllerRef.current = controller;
+  }, []);
+  const handleCompanionBusyChange = useCallback((busy: boolean) => setCompanionBusy(busy), []);
+  const handleCompanionThinkingLevelChange = useCallback((level: CompanionThinkingLevel) => setCompanionThinkingLevel(level), []);
+  const compactCompanion = useCallback(async () => {
+    setCompanionCompacting(true);
+    setCompanionCompactError(null);
+    try {
+      if (!companionControllerRef.current) throw new Error("陪伴对话尚未就绪，请稍后重试。");
+      await companionControllerRef.current.compact();
+    } catch (error) {
+      setCompanionCompactError(error instanceof Error ? error.message : "无法整理当前陪伴对话。");
+    } finally {
+      setCompanionCompacting(false);
+    }
+  }, []);
+  useLayoutEffect(() => {
+    if (tenantWorkspaceOnly && conversationMode === "work" && !isNew && toolPreset !== "none" && toolPreset !== "read-only" && toolPreset !== "default") {
+      void handleToolPresetChange("read-only");
+    }
+  }, [tenantWorkspaceOnly, conversationMode, isNew, toolPreset, handleToolPresetChange]);
   const sessionBusy = agentRunning || bashRunning;
   const [quotedSelection, setQuotedSelection] = useState<{
     text: string;
@@ -749,6 +784,30 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   }, [messages.length]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  const centeredComposer = isCompanionChat ? !companionStarted : isEmptyNew;
+  const lastWorkPresetRef = useRef<ToolPreset>(tenantWorkspaceOnly ? "read-only" : "default");
+  useEffect(() => {
+    if (conversationMode === "work" && toolPreset !== "none") lastWorkPresetRef.current = toolPreset;
+  }, [conversationMode, toolPreset]);
+  const selectModePreset = useCallback((preset: ToolPreset) => {
+    if (tenantWorkspaceOnly && preset === "full") return;
+    if (preset !== "none") lastWorkPresetRef.current = preset;
+    onConversationModeChange(preset === "none" ? "chat" : "work");
+    if (preset !== toolPreset) void handleToolPresetChange(preset);
+  }, [tenantWorkspaceOnly, toolPreset, handleToolPresetChange, onConversationModeChange]);
+  const sendAgentMessage = useCallback(async (text: string, images?: AttachedImage[]) => {
+    // Skill commands need the Agent tools that Chat-only sessions deliberately
+    // disable. Promote a regular Agent conversation to its last Work preset
+    // before sending so a slash Skill cannot silently become model-only prose.
+    if (!isCompanionChat && conversationMode === "chat" && /^\/skill:\S+/.test(text.trim())) {
+      const workPreset = lastWorkPresetRef.current === "none"
+        ? (tenantWorkspaceOnly ? "read-only" : "default")
+        : lastWorkPresetRef.current;
+      onConversationModeChange("work");
+      if (workPreset !== toolPreset) await handleToolPresetChange(workPreset);
+    }
+    await handleSend(text, images);
+  }, [conversationMode, handleSend, handleToolPresetChange, isCompanionChat, onConversationModeChange, tenantWorkspaceOnly, toolPreset]);
   const hasStreamingContent = Boolean(streamState.streamingMessage?.content.length);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const promptAnchorSpacerRef = useRef<HTMLDivElement | null>(null);
@@ -860,35 +919,40 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
-      onSend={handleSend}
-      onAbort={handleAbort}
-      onSteer={agentRunning ? handleSteer : undefined}
-      onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
-      isStreaming={sessionBusy}
-      model={displayModelValue}
+      onSend={isCompanionChat ? (text) => { void companionControllerRef.current?.send(text); } : sendAgentMessage}
+      onAbort={isCompanionChat ? () => { void companionControllerRef.current?.stop(); } : handleAbort}
+      onSteer={!isCompanionChat && agentRunning ? handleSteer : undefined}
+      onFollowUp={!isCompanionChat && agentRunning ? handleFollowUp : undefined}
+      onPromptWithStreamingBehavior={!isCompanionChat && agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      isStreaming={isCompanionChat ? companionBusy : sessionBusy}
+      model={isCompanionChat ? null : displayModelValue}
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
       modelError={modelError}
       modelScopeWarnings={modelScopeWarnings}
-      onModelChange={handleModelChange}
+      onModelChange={isCompanionChat ? undefined : handleModelChange}
       modelSwitching={modelSwitching}
-      onCompact={session || isNew ? handleCompact : undefined}
-      onAbortCompaction={handleAbortCompaction}
-      isCompacting={isCompacting}
-      compactError={compactError}
-      compactResult={compactResult}
-      toolPreset={toolPreset}
-      onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
-      thinkingLevel={thinkingLevel}
-      onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+      onCompact={isCompanionChat ? compactCompanion : (session || isNew) ? handleCompact : undefined}
+      onOpenLongTermMemory={isCompanionChat ? () => setCompanionUnderstandingOpen(true) : undefined}
+      onAbortCompaction={isCompanionChat ? undefined : handleAbortCompaction}
+      isCompacting={isCompanionChat ? companionCompacting : isCompacting}
+      compactError={isCompanionChat ? companionCompactError : compactError}
+      compactResult={isCompanionChat ? null : compactResult}
+      toolPreset={conversationMode === "chat" ? "none" : toolPreset}
+      onToolPresetChange={(session || isNew) ? selectModePreset : undefined}
+      memberOnlyMode={tenantWorkspaceOnly}
+      allowBash={!tenantWorkspaceOnly}
+      thinkingLevel={isCompanionChat ? companionThinkingLevel : thinkingLevel}
+      onThinkingLevelChange={isCompanionChat
+        ? (level) => { void companionControllerRef.current?.setThinkingLevel(level as CompanionThinkingLevel).then(() => setCompanionThinkingLevel(level as CompanionThinkingLevel)); }
+        : (session || isNew) ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       retryInfo={retryInfo}
-      queuedMessages={queuedMessages}
-      inputHistory={inputHistory}
-      onRecallQueue={handleRecallQueue}
+      queuedMessages={isCompanionChat ? undefined : queuedMessages}
+      inputHistory={isCompanionChat ? [] : inputHistory}
+      onRecallQueue={isCompanionChat ? undefined : handleRecallQueue}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
@@ -927,7 +991,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       onDrop={handleDrop}
     >
       {isDragOver && (
-        <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
+        <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_var(--duration-normal)_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             {[0, 0.8, 1.6].map((delay) => (
               <div
@@ -975,6 +1039,19 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         <NoticeShelf notices={notices} floating onPauseChange={setNoticePaused} />
       </div>
 
+      <div className="chat-mode-switcher" role="group" aria-label="对话模式">
+        {(["chat", "work"] as const).map((mode) => (
+          <button key={mode} type="button" aria-pressed={conversationMode === mode} disabled={sessionBusy || companionBusy}
+            className={conversationMode === mode ? "is-active" : ""}
+            onClick={() => {
+              if (mode === conversationMode) return;
+              selectModePreset(mode === "chat" ? "none" : lastWorkPresetRef.current);
+            }}>
+            {mode === "chat" ? "Chat" : "Work"}
+          </button>
+        ))}
+      </div>
+
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         {extensionDialog && (
           <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
@@ -982,7 +1059,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         {extensionCustomUi && (
           <ExtensionCustomPanel key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} />
         )}
-        {!isEmptyNew && <>
+        {isCompanionChat && <CompanionShell embedded onController={registerCompanionController} onBusyChange={handleCompanionBusyChange} onThinkingLevelChange={handleCompanionThinkingLevelChange} onConversationStarted={setCompanionStarted} understandingOpen={companionUnderstandingOpen} onUnderstandingOpenChange={setCompanionUnderstandingOpen} />}
+        {!isCompanionChat && !isEmptyNew && <>
         <div
           ref={scrollContainerRef}
           className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-width:none]"
@@ -1252,8 +1330,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             maxHeight: "calc(var(--app-viewport-height, 100dvh) - 16px)",
             overflowY: "auto",
             padding: quoteInputOpen ? 12 : 3,
-            border: "1px solid var(--border)",
-            borderRadius: 6,
+            border: "var(--border-width) solid var(--border)",
+            borderRadius: "var(--radius-control)",
             background: "var(--bg)",
             boxShadow: "0 2px 10px rgba(0,0,0,0.12)",
           }}
@@ -1262,10 +1340,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             <fieldset
               disabled={quoteSubmitting}
               aria-busy={quoteSubmitting}
-              style={{ width: "100%", minWidth: 0, margin: 0, padding: 0, border: "none", display: "flex", flexDirection: "column", gap: 10 }}
+              style={{ width: "100%", minWidth: 0, margin: 0, padding: 0, border: "none", display: "flex", flexDirection: "column", gap: "var(--space-2-5)" }}
             >
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 600 }}>{t("chat.askInNewChat")}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
+                <span style={{ flex: 1, minWidth: 0, fontSize: "var(--font-size-control)", fontWeight: 600 }}>{t("chat.askInNewChat")}</span>
                 <button type="button" className="file-viewer-icon-button" title={t("i18n.close")} aria-label={t("i18n.close")} disabled={quoteSubmitting} onClick={closeQuotedSelection} style={{ border: "none" }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
                 </button>
@@ -1277,7 +1355,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 onAbort={closeQuotedSelection}
                 isStreaming={false}
               />
-              {quoteError && <div role="alert" style={{ color: "#dc2626", fontSize: 12, overflowWrap: "anywhere" }}>{quoteError}</div>}
+              {quoteError && <div role="alert" style={{ color: "var(--palette-red-600)", fontSize: "var(--font-size-control)", overflowWrap: "anywhere" }}>{quoteError}</div>}
             </fieldset>
           ) : <>
           <button
@@ -1287,9 +1365,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             aria-label={t("chat.askInCurrent")}
             onPointerDown={(event) => event.preventDefault()}
             onClick={askSelectionHere}
-            style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
+            style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 var(--space-2-5)", border: "none", fontSize: "var(--font-size-control)", fontWeight: 500 }}
           >
-            <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
+            <span aria-hidden="true" style={{ fontSize: "var(--font-size-title)" }}>@</span>
             <span>{t("chat.askInCurrent")}</span>
           </button>
           {onAskInNewChat && quotedSelection.sourceEntryId && !sessionBusy && (
@@ -1300,7 +1378,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               aria-label={t("chat.askInNewChat")}
               onPointerDown={(event) => event.preventDefault()}
               onClick={() => { setQuoteInputOpen(true); window.getSelection()?.removeAllRanges(); }}
-              style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
+              style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 var(--space-2-5)", border: "none", fontSize: "var(--font-size-control)", fontWeight: 500 }}
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M6 3v12M18 9a9 9 0 0 1-9 9" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
@@ -1314,19 +1392,19 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       )}
 
       <div className="relative shrink-0">
-        {isEmptyNew && (
+        {centeredComposer && (
           <div className="mb-3 w-full" style={{ paddingLeft: 16, paddingRight: isMobile ? 16 : 52 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto", fontFamily: "var(--font-mono)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-3)", maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto", fontFamily: "var(--font-mono)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 7 : 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <Image src="/icons/apple-touch-icon.png" width={32} height={32} alt="" priority style={{ flexShrink: 0 }} />
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
+                <span aria-hidden="true" style={{ width: 32, height: 32, flexShrink: 0, background: "url(/icons/apple-touch-icon.png) center / contain no-repeat" }} />
+                <span style={{ fontSize: "var(--font-size-display)", color: "var(--text)", fontWeight: 700, flexShrink: 0, whiteSpace: "nowrap" }}>EM</span>
                 <NewSessionUpdateLink label={(version) => t("appUpdate.releaseNotes", { version })} />
               </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "var(--space-0-5)", flexShrink: 0 }}>
+                <span style={{ fontSize: "var(--font-size-meta)", color: "var(--text-muted)" }}>
                   web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
                 </span>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                <span style={{ fontSize: "var(--font-size-meta)", color: "var(--text-muted)" }}>
                   pi <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</span>
                 </span>
               </div>
@@ -1336,7 +1414,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         {chatInputElement}
         <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} />
       </div>
-      {isEmptyNew && <div className="min-h-0 flex-1" />}
+      {centeredComposer && <div className="min-h-0 flex-1" />}
     </div>
   );
 }
@@ -1359,9 +1437,9 @@ function NoticeShelf({ notices, floating = false, onPauseChange }: { notices: No
     >
       {notices.map((notice, index) => {
         const color = notice.type === "error"
-          ? "#ef4444"
+          ? "var(--palette-red-500)"
           : notice.type === "warning"
-            ? "#d97706"
+            ? "var(--palette-amber-600)"
             : notice.type === "success"
               ? "#10b981"
               : "var(--accent)";
@@ -1381,7 +1459,7 @@ function NoticeShelf({ notices, floating = false, onPauseChange }: { notices: No
               display: "flex",
               // Top-align children so the type dot sits by the first line on multi-line toasts
               alignItems: "flex-start",
-              gap: 10,
+              gap: "var(--space-2-5)",
               minHeight: 60,
               height: "auto",
               // 整体高度上限：超出后由文本区内部滚动承担（见下方 span 的 overflowY），
@@ -1392,8 +1470,8 @@ function NoticeShelf({ notices, floating = false, onPauseChange }: { notices: No
               pointerEvents: "auto",
               marginBottom: index === notices.length - 1 ? 0 : 6,
               overflow: "hidden",
-              borderRadius: 14,
-              border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+              borderRadius: "var(--radius-composer)",
+              border: "var(--border-width) solid color-mix(in srgb, var(--border) 70%, transparent)",
               background: "var(--bg)",
               color: "var(--text-muted)",
               width: "fit-content",
@@ -1401,7 +1479,7 @@ function NoticeShelf({ notices, floating = false, onPauseChange }: { notices: No
               boxShadow: floating
                 ? "0 1px 2px rgba(15,23,42,0.05), 0 10px 28px -14px rgba(15,23,42,0.24)"
                 : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
-              fontSize: 14,
+              fontSize: "var(--font-size-body)",
               lineHeight: 1.5,
               transformOrigin: "top right",
               // Use backwards fill for the entrance animation so height styles return to
@@ -1410,7 +1488,7 @@ function NoticeShelf({ notices, floating = false, onPauseChange }: { notices: No
               animation: notice.exiting
                 ? "notice-shelf-out 0.18s ease-in forwards"
                 : "notice-shelf-in 0.18s ease-out backwards",
-              padding: "0 12px",
+              padding: "0 var(--space-3)",
             }}
           >
             <span
@@ -1430,7 +1508,7 @@ function NoticeShelf({ notices, floating = false, onPauseChange }: { notices: No
                 content taller than the cap scrolls inside the text area */}
             <span
               tabIndex={0}
-              style={{ padding: "14px 0", minWidth: 0, maxWidth: "100%", maxHeight: NOTICE_TEXT_MAX_HEIGHT_PX, overflowY: "auto", scrollbarWidth: "thin", whiteSpace: "pre-line", wordBreak: "break-word" }}
+              style={{ padding: "var(--space-3-5) 0", minWidth: 0, maxWidth: "100%", maxHeight: NOTICE_TEXT_MAX_HEIGHT_PX, overflowY: "auto", scrollbarWidth: "thin", whiteSpace: "pre-line", wordBreak: "break-word" }}
             >
               {notice.message}
             </span>
@@ -1477,7 +1555,7 @@ function ExtensionDialog({
   }, [request.expiresAt]);
 
   const countdown = remainingSeconds !== null && (
-    <span style={{ fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap", flexShrink: 0 }}>
+    <span style={{ fontSize: "var(--font-size-meta)", color: "var(--text-dim)", whiteSpace: "nowrap", flexShrink: 0 }}>
       {t("chat.extensionExpiresIn", { seconds: remainingSeconds })}
     </span>
   );
@@ -1518,12 +1596,12 @@ function ExtensionDialog({
             pointerEvents: "auto",
             display: "flex",
             alignItems: "center",
-            gap: 10,
+            gap: "var(--space-2-5)",
             maxWidth: "min(560px, 100%)",
             width: "100%",
-            padding: "10px 12px",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
+            padding: "var(--space-2-5) var(--space-3)",
+            border: "var(--border-width) solid var(--border)",
+            borderRadius: "var(--radius-panel)",
             background: "var(--bg)",
             boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
             color: "var(--text)",
@@ -1531,19 +1609,19 @@ function ExtensionDialog({
             textAlign: "left",
           }}
         >
-          <span style={{ fontSize: 11, fontWeight: 650, color: "var(--accent)", flexShrink: 0 }}>
+          <span style={{ fontSize: "var(--font-size-meta)", fontWeight: 650, color: "var(--accent)", flexShrink: 0 }}>
             {t("chat.extensionPending")}
           </span>
-          <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: "var(--font-size-label)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
             {request.title}
           </span>
           {summary && (
-            <span style={{ fontSize: 12, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "34%", flexShrink: 1 }}>
+            <span style={{ fontSize: "var(--font-size-control)", color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "34%", flexShrink: 1 }}>
               {summary}
             </span>
           )}
           {countdown}
-          <span style={{ fontSize: 12, color: "var(--text-muted)", flexShrink: 0 }}>
+          <span style={{ fontSize: "var(--font-size-control)", color: "var(--text-muted)", flexShrink: 0 }}>
             {t("chat.extensionExpand")}
           </span>
         </button>
@@ -1557,17 +1635,17 @@ function ExtensionDialog({
           maxHeight: "min(760px, 100%)",
           display: "flex",
           flexDirection: "column",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
+          border: "var(--border-width) solid var(--border)",
+          borderRadius: "var(--radius-panel)",
           background: "var(--bg)",
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           overflow: "hidden",
         }}
       >
-        <div style={{ flexShrink: 0, display: "flex", alignItems: "flex-start", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ flexShrink: 0, display: "flex", alignItems: "flex-start", gap: "var(--space-2)", padding: "var(--space-3) var(--space-3-5)", borderBottom: "var(--border-width) solid var(--border)" }}>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650 }}>{request.title}</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+            <div style={{ color: "var(--text)", fontSize: "var(--font-size-body)", fontWeight: 650 }}>{request.title}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-2)", marginTop: 3, color: "var(--text-dim)", fontSize: "var(--font-size-meta)", fontFamily: "var(--font-mono)" }}>
               <span>{t("chat.extensionRequest")}</span>
               {countdown}
             </div>
@@ -1583,8 +1661,8 @@ function ExtensionDialog({
               placeItems: "center",
               width: 28,
               height: 28,
-              borderRadius: 6,
-              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              border: "var(--border-width) solid var(--border)",
               background: "var(--bg-panel)",
               color: "var(--text-muted)",
               cursor: "pointer",
@@ -1620,7 +1698,7 @@ function ExtensionDialog({
                 buttons[next].focus({ preventScroll: true });
                 buttons[next].scrollIntoView({ block: "nearest" });
               }}
-              style={{ display: "grid", gap: 8 }}
+              style={{ display: "grid", gap: "var(--space-2)" }}
             >
               {request.options.map((option, index) => (
                 <div
@@ -1638,14 +1716,14 @@ function ExtensionDialog({
                   }}
                   style={{
                     width: "100%",
-                    padding: "9px 10px",
-                    borderRadius: 7,
-                    border: "1px solid var(--border)",
+                    padding: "9px var(--space-2-5)",
+                    borderRadius: "var(--radius-menu)",
+                    border: "var(--border-width) solid var(--border)",
                     background: "var(--bg-panel)",
                     color: "var(--text)",
                     cursor: "pointer",
                     textAlign: "left",
-                    fontSize: 13,
+                    fontSize: "var(--font-size-label)",
                     overflowWrap: "anywhere",
                   }}
                 >
@@ -1667,13 +1745,13 @@ function ExtensionDialog({
               }}
               style={{
                 width: "100%",
-                padding: "9px 10px",
-                borderRadius: 7,
-                border: "1px solid var(--border)",
+                padding: "9px var(--space-2-5)",
+                borderRadius: "var(--radius-menu)",
+                border: "var(--border-width) solid var(--border)",
                 background: "var(--bg-panel)",
                 color: "var(--text)",
                 outline: "none",
-                fontSize: 13,
+                fontSize: "var(--font-size-label)",
               }}
             />
           )}
@@ -1689,13 +1767,13 @@ function ExtensionDialog({
                 width: "100%",
                 minHeight: 220,
                 padding: 10,
-                borderRadius: 7,
-                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-menu)",
+                border: "var(--border-width) solid var(--border)",
                 background: "var(--bg-panel)",
                 color: "var(--text)",
                 outline: "none",
                 resize: "vertical",
-                fontSize: 13,
+                fontSize: "var(--font-size-label)",
                 lineHeight: 1.55,
                 fontFamily: "var(--font-mono)",
               }}
@@ -1703,14 +1781,14 @@ function ExtensionDialog({
           )}
         </div>
 
-        <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+        <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", gap: "var(--space-2)", padding: "var(--space-2-5) var(--space-3-5)", borderTop: "var(--border-width) solid var(--border)", background: "var(--bg-panel)" }}>
           <button
             autoFocus={request.method === "confirm" || (request.method === "select" && request.options.length === 0)}
             onClick={() => onRespond(request, { cancelled: true })}
             style={{
-              padding: "6px 10px",
-              borderRadius: 6,
-              border: "1px solid var(--border)",
+              padding: "var(--space-1-5) var(--space-2-5)",
+              borderRadius: "var(--radius-control)",
+              border: "var(--border-width) solid var(--border)",
               background: "var(--bg)",
               color: "var(--text-muted)",
               cursor: "pointer",
@@ -1722,9 +1800,9 @@ function ExtensionDialog({
             <button
               onClick={submitValue}
               style={{
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--accent)",
+                padding: "var(--space-1-5) var(--space-2-5)",
+                borderRadius: "var(--radius-control)",
+                border: "var(--border-width) solid var(--accent)",
                 background: "var(--accent)",
                 color: "var(--accent-contrast)",
                 cursor: "pointer",
@@ -1736,9 +1814,9 @@ function ExtensionDialog({
             <button
               onClick={submitValue}
               style={{
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--accent)",
+                padding: "var(--space-1-5) var(--space-2-5)",
+                borderRadius: "var(--radius-control)",
+                border: "var(--border-width) solid var(--accent)",
                 background: "var(--accent)",
                 color: "var(--accent-contrast)",
                 cursor: "pointer",
@@ -1796,12 +1874,12 @@ function ExtensionCustomPanel({
             pointerEvents: "auto",
             display: "flex",
             alignItems: "center",
-            gap: 10,
+            gap: "var(--space-2-5)",
             maxWidth: "min(920px, 100%)",
             width: "100%",
-            padding: "10px 12px",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
+            padding: "var(--space-2-5) var(--space-3)",
+            border: "var(--border-width) solid var(--border)",
+            borderRadius: "var(--radius-panel)",
             background: "var(--bg)",
             boxShadow: "0 12px 32px rgba(0,0,0,0.18)",
             color: "var(--text)",
@@ -1809,18 +1887,18 @@ function ExtensionCustomPanel({
             textAlign: "left",
           }}
         >
-          <span style={{ fontSize: 11, fontWeight: 650, color: "var(--accent)", flexShrink: 0 }}>
+          <span style={{ fontSize: "var(--font-size-meta)", fontWeight: 650, color: "var(--accent)", flexShrink: 0 }}>
             {t("chat.extensionPending")}
           </span>
-          <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: "var(--font-size-label)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
             {t("chat.extensionPanel")}
           </span>
           {summary && (
-            <span style={{ fontSize: 12, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "34%", flexShrink: 1 }}>
+            <span style={{ fontSize: "var(--font-size-control)", color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "34%", flexShrink: 1 }}>
               {summary}
             </span>
           )}
-          <span style={{ fontSize: 12, color: "var(--text-muted)", flexShrink: 0 }}>
+          <span style={{ fontSize: "var(--font-size-control)", color: "var(--text-muted)", flexShrink: 0 }}>
             {t("chat.extensionExpand")}
           </span>
         </button>
@@ -1837,8 +1915,8 @@ function ExtensionCustomPanel({
           maxHeight: "min(760px, 100%)",
           display: "flex",
           flexDirection: "column",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
+          border: "var(--border-width) solid var(--border)",
+          borderRadius: "var(--radius-panel)",
           background: "var(--bg)",
           boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
           overflow: "hidden",
@@ -1893,9 +1971,9 @@ function ExtensionCustomPanel({
             pointerEvents: "none",
           }}
         />
-        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
-           <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 650 }}>{t("chat.extensionPanel")}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-3)", padding: "var(--space-2-5) var(--space-3)", borderBottom: "var(--border-width) solid var(--border)" }}>
+           <div style={{ color: "var(--text)", fontSize: "var(--font-size-label)", fontWeight: 650 }}>{t("chat.extensionPanel")}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)" }}>
             <button
               type="button"
               onClick={() => setCollapsed(true)}
@@ -1907,8 +1985,8 @@ function ExtensionCustomPanel({
                 placeItems: "center",
                 width: 28,
                 height: 28,
-                borderRadius: 6,
-                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-control)",
+                border: "var(--border-width) solid var(--border)",
                 background: "var(--bg-panel)",
                 color: "var(--text-muted)",
                 cursor: "pointer",
@@ -1923,12 +2001,12 @@ function ExtensionCustomPanel({
               onClick={() => onInput(request, "\x03")}
               style={{
                 padding: "5px 9px",
-                borderRadius: 6,
-                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-control)",
+                border: "var(--border-width) solid var(--border)",
                 background: "var(--bg-panel)",
                 color: "var(--text-muted)",
                 cursor: "pointer",
-                fontSize: 12,
+                fontSize: "var(--font-size-control)",
               }}
             >
                {t("chat.close")}
@@ -1944,7 +2022,7 @@ function ExtensionCustomPanel({
             background: "var(--bg-panel)",
             color: "var(--text)",
             fontFamily: "var(--font-mono)",
-            fontSize: 13,
+            fontSize: "var(--font-size-label)",
             lineHeight: 1.45,
             whiteSpace: "pre",
           }}
