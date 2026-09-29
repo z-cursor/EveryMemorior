@@ -26,7 +26,8 @@ function bindAgentSession(
   const existing = store.getAgentSessionExecution(agentSessionId);
   if (existing) {
     if (existing.tenantId !== auth.tenant.id
-      || (!canManageHostConfiguration(auth) && existing.createdByMembershipId !== auth.membership.id)) {
+      || existing.createdByMembershipId !== auth.membership.id
+      || !canAccessWorkspacePath(auth, existing.workspacePath)) {
       throw new TenantAuthenticationError("Agent session belongs to another tenant", 403);
     }
     return;
@@ -62,9 +63,8 @@ export function authorizeAgentSessionRequest(
   const existing = store.getAgentSessionExecution(agentSessionId);
   if (existing) {
     if (existing.tenantId !== auth.tenant.id
-      || (!canManageHostConfiguration(auth)
-        && (existing.createdByMembershipId !== auth.membership.id
-          || !canAccessWorkspacePath(auth, existing.workspacePath)))) {
+      || existing.createdByMembershipId !== auth.membership.id
+      || !canAccessWorkspacePath(auth, existing.workspacePath)) {
       throw new TenantAuthenticationError("Agent session belongs to another tenant", 403);
     }
     return;
@@ -85,21 +85,19 @@ export function authorizeAgentSessionFileRequest(
 
 export function tenantWorkspaceRootsForRequest(request: Request): string[] {
   const auth = requireTenantSession(request);
-  return canManageHostConfiguration(auth)
-    ? getTenantStore().listActiveWorkspaceRoots(auth.tenant.id)
-    : [tenantManagedWorkspaceRoot(auth)];
+  const managed = tenantManagedWorkspaceRoot(auth);
+  const owned = getTenantStore().listActiveWorkspaceRootsForMembership(auth.tenant.id, auth.membership.id);
+  return owned.length > 0 ? [...new Set(owned)] : [managed];
 }
 
 export function tenantAgentSessionIdsForRequest(request: Request, sessionIds: string[]): string[] {
   const auth = requireTenantSession(request);
   const store = getTenantStore();
-  const hostAccess = canManageHostConfiguration(auth);
   return sessionIds.filter((id) => {
     const binding = store.getAgentSessionExecution(id);
     return binding?.tenantId === auth.tenant.id
-      && (hostAccess
-        || (binding.createdByMembershipId === auth.membership.id
-          && canAccessWorkspacePath(auth, binding.workspacePath)));
+      && binding.createdByMembershipId === auth.membership.id
+      && canAccessWorkspacePath(auth, binding.workspacePath);
   });
 }
 
@@ -109,14 +107,12 @@ export function tenantSessionsForRequest<T extends { id: string; cwd: string }>(
 ): T[] {
   const auth = requireTenantSession(request);
   const store = getTenantStore();
-  const hostAccess = canManageHostConfiguration(auth);
-  const mayAdoptLegacy = hostAccess;
   return sessions.filter((session) => {
     const binding = store.getAgentSessionExecution(session.id);
     if (binding) return binding.tenantId === auth.tenant.id
-      && (hostAccess || (binding.createdByMembershipId === auth.membership.id
-        && canAccessWorkspacePath(auth, binding.workspacePath)));
-    if (!mayAdoptLegacy || !session.cwd) return false;
+      && binding.createdByMembershipId === auth.membership.id
+      && canAccessWorkspacePath(auth, binding.workspacePath);
+    if (!canManageHostConfiguration(auth) || !session.cwd || !canAccessWorkspacePath(auth, session.cwd)) return false;
     authorizeAgentSessionRequest(request, session.id, session.cwd);
     return true;
   });
@@ -131,15 +127,15 @@ export async function runAgentSandboxCommand(
   if (!execution) throw new TenantAuthenticationError("Agent session has no tenant sandbox binding", 403);
   let sandbox = sandboxes().get(agentSessionId);
   if (!sandbox) {
-    const creator = getTenantStore().getMembership(execution.tenantId, execution.createdByMembershipId);
     sandbox = AgentSandbox.open({
       tenantId: execution.tenantId,
       agentId: agentSessionId,
       workspacePath: execution.workspacePath,
-      skillPaths: creator && creator.role !== "member"
-        ? getTenantStore().listPublishedTenantSkillPathsForTenant(execution.tenantId)
-        : getTenantStore().listPublishedTenantSkillPaths(execution.tenantId, execution.createdByMembershipId),
-      includeGlobalSkills: getTenantStore().getInstallationOwnerMembershipId() === execution.createdByMembershipId,
+      skillPaths: getTenantStore().listPublishedTenantSkillPaths(
+        execution.tenantId,
+        execution.createdByMembershipId,
+      ),
+      includeGlobalSkills: false,
     });
     sandboxes().set(agentSessionId, sandbox);
     sandbox.catch(() => sandboxes().delete(agentSessionId));

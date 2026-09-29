@@ -1,5 +1,4 @@
 import { mkdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
@@ -19,7 +18,7 @@ export async function GET(request: Request) {
     const auth = requireTenantSession(request);
     const store = getTenantStore();
     const host = canManageHostConfiguration(auth);
-    const active = await Promise.all(store.listActiveWorkspaces(auth.tenant.id).map(async (workspace) => {
+    const active = await Promise.all(store.listActiveWorkspacesForMembership(auth.tenant.id, auth.membership.id).map(async (workspace) => {
       const physicalRoot = host ? (await resolveProject(workspace.rootPath)).projectRoot : workspace.rootPath;
       const root = workspacePathToClient(auth, physicalRoot);
       return root ? { key: projectIdentityKey(root), root, name: workspace.name, primary: projectIdentityKey(physicalRoot) === projectIdentityKey(workspace.rootPath) } : null;
@@ -30,7 +29,9 @@ export async function GET(request: Request) {
       if (!projectMap.has(project.key) || project.primary) projectMap.set(project.key, project);
     }
     const projects = [...projectMap.values()];
-    const archivedKeys = (await Promise.all(store.listArchivedWorkspaces(auth.tenant.id).map(async (workspace) => {
+    const archivedKeys = (await Promise.all(store.listArchivedWorkspaces(auth.tenant.id)
+      .filter((workspace) => workspace.createdByMembershipId === auth.membership.id)
+      .map(async (workspace) => {
       const physicalRoot = host ? (await resolveProject(workspace.rootPath)).projectRoot : workspace.rootPath;
       const root = workspacePathToClient(auth, physicalRoot);
       return root ? projectIdentityKey(root) : null;
@@ -49,9 +50,7 @@ export async function POST(request: Request) {
     const body = await request.json() as { name?: unknown };
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name || name.length > 80 || /[\x00-\x1f\x7f]/.test(name)) return NextResponse.json({ error: "Project name must be 1–80 visible characters" }, { status: 400 });
-    const parent = canManageHostConfiguration(auth)
-      ? join(homedir(), "EveryMemorior Projects")
-      : join(tenantManagedWorkspaceRoot(auth), "projects");
+    const parent = join(tenantManagedWorkspaceRoot(auth), "projects");
     const slug = name.toLocaleLowerCase("en-US").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "project";
     const rootPath = join(parent, `${slug}-${randomUUID().slice(0, 8)}`);
     mkdirSync(rootPath, { recursive: true });

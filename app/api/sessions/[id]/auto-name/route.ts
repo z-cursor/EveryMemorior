@@ -5,6 +5,7 @@ import { getRpcSession, isPersistedChatOnlySession, startRpcSession } from "@/li
 import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
 import { authorizeAgentSessionFileRequest } from "@/lib/tenant-agent-runtime";
 import { canManageHostConfiguration, requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
+import { tenantManagedWorkspaceRoot } from "@/lib/tenant-workspace";
 
 export async function POST(
   req: Request,
@@ -23,15 +24,21 @@ export async function POST(
     authorizeAgentSessionFileRequest(req, id, filePath);
 
     const existing = getRpcSession(id);
+    if (existing?.isAlive() && !existing.isTenantIsolated()) {
+      if (existing.isRunning()) return NextResponse.json({ error: "Agent session is not tenant-isolated" }, { status: 403 });
+      await existing.shutdown();
+    }
     if (!hostAccess && (
-      (existing?.isAlive() && !existing.isTenantIsolated())
-      || (!adminAccess && (existing?.isAlive() ? !existing.isChatOnly() : !isPersistedChatOnlySession(filePath)))
+      (!adminAccess && (existing?.isAlive() ? !existing.isChatOnly() : !isPersistedChatOnlySession(filePath)))
     )) {
       return NextResponse.json({ error: "Agent session is not tenant-isolated" }, { status: 403 });
     }
     const { session } = existing?.isAlive()
       ? { session: existing }
-      : await startRpcSession(id, filePath, undefined, { tenantIsolated: !hostAccess });
+      : await startRpcSession(id, filePath, undefined, {
+        tenantIsolated: true,
+        tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
+      });
     if (!hostAccess && (!session.isTenantIsolated() || (!adminAccess && !session.isChatOnly()))) {
       return NextResponse.json({ error: "Agent session is not tenant-isolated" }, { status: 403 });
     }

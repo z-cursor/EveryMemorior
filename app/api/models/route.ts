@@ -11,8 +11,9 @@ import {
 import { resolveVisibleModels, selectInitialModelScope } from "@/lib/model-scope";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { projectTrustReloadOptions } from "@/lib/project-trust";
-import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
-import { tenantManagedWorkspaceRoot, workspacePathFromClient } from "@/lib/tenant-workspace";
+import { requireTenantSession } from "@/lib/tenant-auth";
+import { workspacePathFromClient } from "@/lib/tenant-workspace";
+import { tenantWorkspaceRootsForRequest } from "@/lib/tenant-agent-runtime";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS } from "@/lib/chat-only";
 
 export const dynamic = "force-dynamic";
@@ -104,14 +105,12 @@ const EMPTY_MODELS: ModelsData = {
 
 export async function GET(req: Request) {
   const auth = requireTenantSession(req);
-  const tenantRoots = canManageHostConfiguration(auth)
-    ? null : new Set([tenantManagedWorkspaceRoot(auth)]);
-  const requestedCwd = new URL(req.url).searchParams.get("cwd")
-    || (tenantRoots ? "/workspace" : process.cwd());
+  const tenantRoots = new Set(tenantWorkspaceRootsForRequest(req));
+  const requestedCwd = new URL(req.url).searchParams.get("cwd") || "/workspace";
   const physicalCwd = workspacePathFromClient(auth, requestedCwd);
   if (!physicalCwd) return Response.json({ error: "Access denied" }, { status: 403 });
   const cwd = resolve(physicalCwd);
-  if (tenantRoots && !isFilePathAllowed(cwd, tenantRoots)) {
+  if (!isFilePathAllowed(cwd, tenantRoots)) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
@@ -126,12 +125,12 @@ export async function GET(req: Request) {
   }
   const allowedRoots = await getAllowedFileRoots();
   if (!isExistingFilePathAllowed(cwd, allowedRoots)
-    || (tenantRoots && !isExistingFilePathAllowed(cwd, tenantRoots))) {
+    || !isExistingFilePathAllowed(cwd, tenantRoots)) {
     return Response.json({ error: "Access denied" }, { status: 403 });
   }
 
   try {
-    return Response.json(await loadModelsWithCache(tenantRoots ? `tenant:${cwd}` : cwd, () => loadModels(cwd, Boolean(tenantRoots))));
+    return Response.json(await loadModelsWithCache(`tenant:${cwd}`, () => loadModels(cwd, true)));
   } catch {
     return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
   }

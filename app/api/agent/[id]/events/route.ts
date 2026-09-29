@@ -25,7 +25,7 @@ export async function GET(
     let sessionPromise;
     if (session?.isAlive()) {
       authorizeAgentSessionRequest(req, id, session.cwd);
-      if (!hostAccess && !session.isChatOnly() && !session.isTenantIsolated()) {
+      if (!session.isTenantIsolated()) {
         // Dev hot reload can leave an idle wrapper created before tenant
         // isolation was enabled. Reopen it with the current policy; never
         // replace a wrapper while it is running.
@@ -51,11 +51,11 @@ export async function GET(
         sessionPromise = startRpcSession(id, "", binding.workspacePath, {
           initialSessionId: id,
           toolNames: hostAccess ? undefined : [],
-          tenantIsolated: !hostAccess,
+          tenantIsolated: true,
           tenantSkillPaths: publishedTenantSkillPaths(auth),
-          ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+          tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
         }).then((result) => {
-          if (!hostAccess && !result.session.isChatOnly() && !result.session.isTenantIsolated()) {
+          if (!result.session.isTenantIsolated()) {
             throw new TenantAuthenticationError("Agent session is not tenant-isolated", 403);
           }
           return result.session;
@@ -67,12 +67,12 @@ export async function GET(
         }
         if (req.signal.aborted) return new Response(null, { status: 204 });
         sessionPromise = startRpcSession(id, filePath, undefined, {
-          tenantIsolated: !hostAccess,
+          tenantIsolated: true,
           tenantSkillPaths: publishedTenantSkillPaths(auth),
-          ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+          tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
         })
           .then((result) => {
-            if (!hostAccess && !result.session.isChatOnly() && !result.session.isTenantIsolated()) {
+            if (!result.session.isTenantIsolated()) {
               throw new TenantAuthenticationError("Agent session is not tenant-isolated", 403);
             }
             return result.session;

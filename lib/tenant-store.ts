@@ -1595,6 +1595,26 @@ export class TenantStore {
     return rows.map((row) => asString(row, "root_path"));
   }
 
+  /** Active workspace roots owned by one signed-in membership. */
+  listActiveWorkspaceRootsForMembership(tenantId: string, membershipId: string): string[] {
+    const rows = this.database.prepare(`
+      SELECT root_path FROM workspaces
+      WHERE tenant_id = ? AND created_by_membership_id = ? AND status = 'active'
+      ORDER BY created_at ASC
+    `).all(tenantId, membershipId) as SqlRow[];
+    return rows.map((row) => asString(row, "root_path"));
+  }
+
+  listActiveWorkspacesForMembership(tenantId: string, membershipId: string): Workspace[] {
+    const rows = this.database.prepare(`
+      SELECT id, tenant_id, slug, name, root_path, status, created_by_membership_id, created_at, updated_at
+      FROM workspaces
+      WHERE tenant_id = ? AND created_by_membership_id = ? AND status = 'active'
+      ORDER BY updated_at DESC
+    `).all(tenantId, membershipId) as SqlRow[];
+    return rows.map(mapWorkspace);
+  }
+
   bindAgentSession(
     context: TenantContext,
     workspaceId: string,
@@ -2865,6 +2885,9 @@ export class TenantStore {
     `).get(context.tenantId, input.rootPath) as SqlRow | undefined;
     if (existing) {
       const workspace = mapWorkspace(existing);
+      if (workspace.createdByMembershipId !== context.membershipId) {
+        throw new Error("Workspace belongs to another account");
+      }
       if (workspace.status === "archived") {
         this.database.prepare(`
           UPDATE workspaces SET status = 'active', archived_at = NULL, updated_at = ?

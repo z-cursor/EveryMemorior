@@ -76,9 +76,9 @@ export async function POST(
         const started = await startRpcSession(id, "", sessionCwd, {
           initialSessionId: id,
           toolNames: activeToolNames,
-          tenantIsolated: !hostAccess,
+          tenantIsolated: true,
           tenantSkillPaths: publishedTenantSkillPaths(auth),
-          ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+          tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
           ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
           ...(model ? { allowInitialModelFallback: true } : {}),
           ...(thinkingLevel ? { thinkingLevel } : {}),
@@ -91,9 +91,9 @@ export async function POST(
       }
       if (existing?.isAlive()) await existing.shutdown();
       const started = await startRpcSession(id, filePath, undefined, {
-        tenantIsolated: !hostAccess,
+        tenantIsolated: true,
         tenantSkillPaths: publishedTenantSkillPaths(auth),
-        ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+        tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
       });
       return NextResponse.json({ success: true, data: { refreshed: true, sessionId: started.realSessionId } });
     }
@@ -104,9 +104,9 @@ export async function POST(
       }
       const auth = requireTenantSession(req);
       const changed = await setRpcSessionTools(id, filePath, toolNames, {
-        tenantIsolated: !hostAccess,
+        tenantIsolated: true,
         tenantSkillPaths: publishedTenantSkillPaths(auth),
-        ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+        tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
       });
       return NextResponse.json({
         success: true,
@@ -137,9 +137,9 @@ export async function POST(
 
     const { session } = await startRpcSession(id, filePath, undefined, {
       ...(toolNames !== undefined ? { toolNames } : {}),
-      tenantIsolated: !hostAccess,
+      tenantIsolated: true,
       tenantSkillPaths: publishedTenantSkillPaths(requireTenantSession(req)),
-      ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(requireTenantSession(req)) } : {}),
+      tenantWorkspaceRoot: tenantManagedWorkspaceRoot(requireTenantSession(req)),
     });
     authorizeAgentSessionRequest(req, id, session.cwd);
     if (!hostAccess && !session.isChatOnly() && !session.isTenantIsolated()) {
@@ -175,7 +175,7 @@ export async function GET(
     }
 
     authorizeAgentSessionRequest(req, id, session.cwd);
-    if (!canManageHostConfiguration(requireTenantSession(req)) && !session.isChatOnly() && !session.isTenantIsolated()) {
+    if (!session.isTenantIsolated()) {
       return NextResponse.json({ error: "This Agent session is not tenant-isolated" }, { status: 403 });
     }
 
