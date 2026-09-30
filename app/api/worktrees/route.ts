@@ -48,7 +48,14 @@ export async function GET(req: Request) {
     const session = requireTenantSession(req);
     const context = { tenantId: session.tenant.id, membershipId: session.membership.id };
     for (const w of worktrees) {
-      getTenantStore().ensureWorkspace(context, { name: w.branch || "Worktree", rootPath: w.path });
+      // Listing worktrees is a read-only hydration step. It must not turn a
+      // project that the user archived on another device back into an active
+      // project merely because the selector was opened.
+      getTenantStore().ensureWorkspace(
+        context,
+        { name: w.branch || "Worktree", rootPath: w.path },
+        { reviveArchived: false },
+      );
     }
     return NextResponse.json({
       projectRoot: project.projectRoot,

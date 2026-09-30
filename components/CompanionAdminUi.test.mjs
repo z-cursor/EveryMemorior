@@ -27,6 +27,8 @@ test("administration surfaces own their scroll area and support narrow screens",
 
 test("skill governance is loaded for admins and draft upload stays in its own form", () => {
   assert.match(team, /data\?\.canManage \? "\?view=governance"/);
+  assert.match(team, /<details open className="admin-details"/);
+  assert.match(team, /onClick=\{\(\) => deleteSkill\(skill\)\}>删除<\/ConfigButton>/);
   assert.match(team, /onSubmit=\{\(event\) => \{ event\.stopPropagation\(\); uploadSkill\(event\); \}\}/);
   assert.match(team, /<ConfigButton type="submit" onClick=\{\(event\) => event\.stopPropagation\(\)\}[^>]*>上传 ZIP 草稿/);
   assert.match(team, /sendAgentCommand\(sessionId, \{ type: "reload", refreshTenantSkills: true \}\)/);

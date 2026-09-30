@@ -17,7 +17,8 @@ test("agent SSE starts sessions asynchronously and disables response buffering",
   assert.match(agentEventsSource, /initialSessionId: id/);
   assert.match(agentEventsSource, /isPersistedTenantSession\(filePath\)/);
   assert.doesNotMatch(agentEventsSource, /isPersistedChatOnlySession\(filePath\)/);
-  assert.match(agentEventsSource, /tenantSkillPaths: publishedTenantSkillPaths\(auth\)/);
+  assert.match(agentEventsSource, /const tenantSkillPaths = publishedTenantSkillPaths\(auth\)/);
+  assert.match(agentEventsSource, /tenantSkillPaths,/);
   assert.match(agentEventsSource, /tenantWorkspaceRoot: tenantManagedWorkspaceRoot\(auth\)/);
   assert.match(agentEventsSource, /"Cache-Control": "no-cache, no-transform"/);
   assert.match(agentEventsSource, /"X-Accel-Buffering": "no"/);

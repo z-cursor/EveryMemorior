@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
-import { startRpcSession, getRpcSession, isPersistedTenantSession, setRpcSessionTools } from "@/lib/rpc-manager";
+import { ensureRpcSessionTenantSkills, startRpcSession, getRpcSession, isPersistedTenantSession, setRpcSessionTools, TenantSkillSnapshotError } from "@/lib/rpc-manager";
 import { authorizeAgentSessionRequest } from "@/lib/tenant-agent-runtime";
 import { canManageHostConfiguration, requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
 import { readSessionHeader } from "@/lib/session-reader";
 import { tenantManagedWorkspaceRoot, workspaceAgentStateToClient, workspaceErrorMessageForClient } from "@/lib/tenant-workspace";
 import { publishedTenantSkillPaths } from "@/lib/tenant-skills";
+import { getTenantStore } from "@/lib/tenant-store";
 import { isTenantWorkspaceToolSelection } from "@/lib/tenant-tool-policy";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
@@ -19,7 +20,9 @@ export async function POST(
   let promptAccepted = false;
 
   try {
-    const hostAccess = canManageHostConfiguration(requireTenantSession(req));
+    const auth = requireTenantSession(req);
+    const hostAccess = canManageHostConfiguration(auth);
+    const tenantSkillPaths = publishedTenantSkillPaths(auth);
     const body = await req.json() as { type: string; [key: string]: unknown };
     commandType = typeof body.type === "string" ? body.type : undefined;
     const requestedToolNames = body.toolNames;
@@ -38,8 +41,11 @@ export async function POST(
 
     // Fast path: already-running session
     let existing = getRpcSession(id);
-    if (existing?.isAlive()) authorizeAgentSessionRequest(req, id, existing.cwd);
-    if (!hostAccess && existing?.isAlive() && !existing.isChatOnly() && !existing.isTenantIsolated()) {
+    if (existing?.isAlive()) {
+      authorizeAgentSessionRequest(req, id, existing.cwd);
+      existing = await ensureRpcSessionTenantSkills(existing, tenantSkillPaths);
+    }
+    if (existing?.isAlive() && !existing.isTenantIsolated()) {
       // A dev hot reload can leave an idle wrapper created before tenant
       // isolation was enabled. Reopen it with the current policy; never
       // replace a wrapper while it is handling a prompt or tool call.
@@ -62,7 +68,17 @@ export async function POST(
         // effect immediately. Preserve the id/model/tools that the composer
         // is already using; there is no persisted transcript to reopen.
         if (!existing?.isAlive()) {
-          return NextResponse.json({ success: true, data: { refreshed: false } });
+          const binding = getTenantStore().getAgentSessionExecution(id);
+          if (!binding) return NextResponse.json({ success: true, data: { refreshed: false } });
+          authorizeAgentSessionRequest(req, id, binding.workspacePath);
+          const started = await startRpcSession(id, "", binding.workspacePath, {
+            initialSessionId: id,
+            toolNames: hostAccess ? undefined : [],
+            tenantIsolated: true,
+            tenantSkillPaths,
+            tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
+          });
+          return NextResponse.json({ success: true, data: { refreshed: true, sessionId: started.realSessionId } });
         }
         const sessionCwd = existing.cwd;
         const model = existing.inner.model;
@@ -77,7 +93,7 @@ export async function POST(
           initialSessionId: id,
           toolNames: activeToolNames,
           tenantIsolated: true,
-          tenantSkillPaths: publishedTenantSkillPaths(auth),
+          tenantSkillPaths,
           tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
           ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
           ...(model ? { allowInitialModelFallback: true } : {}),
@@ -92,7 +108,7 @@ export async function POST(
       if (existing?.isAlive()) await existing.shutdown();
       const started = await startRpcSession(id, filePath, undefined, {
         tenantIsolated: true,
-        tenantSkillPaths: publishedTenantSkillPaths(auth),
+        tenantSkillPaths,
         tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
       });
       return NextResponse.json({ success: true, data: { refreshed: true, sessionId: started.realSessionId } });
@@ -105,7 +121,7 @@ export async function POST(
       const auth = requireTenantSession(req);
       const changed = await setRpcSessionTools(id, filePath, toolNames, {
         tenantIsolated: true,
-        tenantSkillPaths: publishedTenantSkillPaths(auth),
+        tenantSkillPaths,
         tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
       });
       return NextResponse.json({
@@ -122,12 +138,27 @@ export async function POST(
 
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
-      return NextResponse.json({
-        error: "Session not found",
-        ...(body.type === "prompt"
-          ? { code: "prompt_rejected", accepted: false }
-          : {}),
-      }, { status: 404 });
+      const binding = getTenantStore().getAgentSessionExecution(id);
+      if (!binding) {
+        return NextResponse.json({
+          error: "Session not found",
+          ...(body.type === "prompt"
+            ? { code: "prompt_rejected", accepted: false }
+            : {}),
+        }, { status: 404 });
+      }
+      authorizeAgentSessionRequest(req, id, binding.workspacePath);
+      const started = await startRpcSession(id, "", binding.workspacePath, {
+        initialSessionId: id,
+        ...(toolNames !== undefined ? { toolNames } : { toolNames: hostAccess ? undefined : [] }),
+        tenantIsolated: true,
+        tenantSkillPaths,
+        tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
+      });
+      const result = await started.session.send(body);
+      promptAccepted = body.type === "prompt";
+      return NextResponse.json({ success: true, data: (body.type === "get_state" || body.type === "get_session_stats")
+        ? workspaceAgentStateToClient(auth, result) : result });
     }
 
     authorizeAgentSessionRequest(req, id, readSessionHeader(filePath)?.cwd);
@@ -138,11 +169,11 @@ export async function POST(
     const { session } = await startRpcSession(id, filePath, undefined, {
       ...(toolNames !== undefined ? { toolNames } : {}),
       tenantIsolated: true,
-      tenantSkillPaths: publishedTenantSkillPaths(requireTenantSession(req)),
-      tenantWorkspaceRoot: tenantManagedWorkspaceRoot(requireTenantSession(req)),
+      tenantSkillPaths,
+      tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
     });
     authorizeAgentSessionRequest(req, id, session.cwd);
-    if (!hostAccess && !session.isChatOnly() && !session.isTenantIsolated()) {
+    if (!session.isTenantIsolated()) {
       return NextResponse.json({ error: "This Agent session is not tenant-isolated" }, { status: 403 });
     }
     const result = await session.send(body);
@@ -151,7 +182,7 @@ export async function POST(
     return NextResponse.json({ success: true, data: (body.type === "get_state" || body.type === "get_session_stats")
       ? workspaceAgentStateToClient(requireTenantSession(req), result) : result });
   } catch (error) {
-    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    const status = error instanceof TenantAuthenticationError || error instanceof TenantSkillSnapshotError ? error.status : 500;
     return NextResponse.json({
       error: workspaceErrorMessageForClient(req, error),
       ...(commandType === "prompt" && !promptAccepted
@@ -169,7 +200,13 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const session = getRpcSession(id);
+    const auth = requireTenantSession(req);
+    const candidate = getRpcSession(id);
+    // Authorize against the live wrapper before refreshing its immutable Skill
+    // snapshot. Otherwise a request from another tenant could evict an idle
+    // wrapper merely by presenting its session id.
+    if (candidate?.isAlive()) authorizeAgentSessionRequest(req, id, candidate.cwd);
+    const session = await ensureRpcSessionTenantSkills(candidate, publishedTenantSkillPaths(auth));
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });
     }
@@ -180,9 +217,9 @@ export async function GET(
     }
 
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state: workspaceAgentStateToClient(requireTenantSession(req), state) });
+    return NextResponse.json({ running: true, state: workspaceAgentStateToClient(auth, state) });
   } catch (error) {
-    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    const status = error instanceof TenantAuthenticationError || error instanceof TenantSkillSnapshotError ? error.status : 500;
     return NextResponse.json({ error: workspaceErrorMessageForClient(req, error) }, { status });
   }
 }

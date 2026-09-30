@@ -44,9 +44,9 @@
 .resetAction:hover:not(:disabled) { border: 0; background: none; text-decoration: underline; }
 .close:focus-visible, .button:focus-visible, .textButton:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-:global(html[data-companion-text-size="large"] .companion-shell) { --companion-font-scale: 1.15; font-size: calc(1rem * var(--companion-font-scale)); }
-:global(html[data-companion-text-size="largest"] .companion-shell) { --companion-font-scale: 1.3; font-size: calc(1rem * var(--companion-font-scale)); }
-:global(html[data-companion-contrast="high"] .companion-shell) { filter: contrast(1.15); }
+:global(html[data-companion-text-size="large"]) .companion-shell { --companion-font-scale: 1.15; font-size: calc(1rem * var(--companion-font-scale)); }
+:global(html[data-companion-text-size="largest"]) .companion-shell { --companion-font-scale: 1.3; font-size: calc(1rem * var(--companion-font-scale)); }
+:global(html[data-companion-contrast="high"]) .companion-shell { filter: contrast(1.15); }
 
 @media (max-width: 600px) {
   .panel { padding: 18px 16px; }

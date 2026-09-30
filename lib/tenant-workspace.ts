@@ -30,6 +30,21 @@ function belongsToAnotherMembershipWorkspace(session: AuthenticatedTenantSession
   // The per-membership managed root is authoritative even when a legacy
   // workspace record points at a broad parent directory that contains it.
   if (isFilePathAllowed(path, new Set([tenantManagedWorkspaceRoot(session)]))) return false;
+
+  // A session can be observed before its workspace row/binding is committed.
+  // Do not let that small window turn another membership's managed directory
+  // into an owner-adoptable legacy path. The directory identity itself is the
+  // boundary, even before SQLite has caught up.
+  const tenantRoot = join(getAgentDir(), "tenant-workspaces", session.tenant.id);
+  if (isFilePathAllowed(path, new Set([tenantRoot]))) return true;
+
+  // Companion sessions use a separate private root but follow the same
+  // tenant/membership layout. They must not become host-owner legacy paths
+  // during their creation race either.
+  const companionTenantRoot = join(getAgentDir(), "companion-sessions", session.tenant.id);
+  if (isFilePathAllowed(path, new Set([join(companionTenantRoot, session.membership.id)]))) return false;
+  if (isFilePathAllowed(path, new Set([companionTenantRoot]))) return true;
+
   return getTenantStore().listActiveWorkspaces(session.tenant.id)
     .some((workspace) => workspace.createdByMembershipId !== session.membership.id
       && isFilePathAllowed(path, new Set([workspace.rootPath])));

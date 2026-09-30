@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { statSync, type Stats } from "fs";
 import { homedir } from "os";
-import { isAbsolute, resolve } from "path";
+import { basename, isAbsolute, resolve } from "path";
 import { allowFileRoot, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { resolveProject } from "@/lib/worktree";
 import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
-import { canAccessWorkspacePath, tenantManagedWorkspaceRoot, workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
 import { getTenantStore } from "@/lib/tenant-store";
-import { basename } from "node:path";
+import { canAccessWorkspacePath, tenantManagedWorkspaceRoot, workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
 
 function normalizeCwd(cwd: string): string {
   if (cwd === "~") return homedir();
@@ -55,7 +54,8 @@ export async function POST(req: Request) {
       { tenantId: session.tenant.id, membershipId: session.membership.id },
       { name: basename(normalizedCwd) || "Workspace", rootPath: normalizedCwd },
     );
-    const projectRoot = canManageHostConfiguration(session)
+    const hostAccess = canManageHostConfiguration(session);
+    const projectRoot = hostAccess
       ? (await resolveProject(normalizedCwd)).projectRoot
       : tenantManagedWorkspaceRoot(session);
     return NextResponse.json({

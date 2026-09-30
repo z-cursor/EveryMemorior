@@ -1,7 +1,7 @@
 "use client";
 
 // PROTOTYPE — Three tenant-aware Pi Web shells, switchable with ?variant= and ?screen=.
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import "./prototype.css";
 
@@ -240,9 +240,17 @@ function PrototypeSwitcher({ variant, screen }: { variant: Variant; screen: Scre
   );
 }
 
-export default function TenantShellPrototype() {
+function TenantShellPrototype() {
   const params = useSearchParams();
   const variant = (["a", "b", "c"].includes(params.get("variant") ?? "") ? params.get("variant") : "a") as Variant;
   const screen = (["chat", "settings", "identity"].includes(params.get("screen") ?? "") ? params.get("screen") : "chat") as Screen;
   return <div className="proto-root">{variant === "a" ? <VariantA screen={screen} /> : variant === "b" ? <VariantB screen={screen} /> : <VariantC screen={screen} />}<PrototypeSwitcher variant={variant} screen={screen} /></div>;
+}
+
+export default function TenantShellPage() {
+  return (
+    <Suspense fallback={<div className="proto-root" />}>
+      <TenantShellPrototype />
+    </Suspense>
+  );
 }

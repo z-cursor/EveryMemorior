@@ -12,5 +12,7 @@ test("tenant Skill refresh requests rebuild the live session with current publis
   assert.match(route, /if \(existing\?\.isAlive\(\)\) await existing\.shutdown\(\)/);
   assert.match(route, /if \(!existing\?\.isAlive\(\)\) \{[\s\S]*?refreshed: false/);
   assert.match(route, /initialSessionId: id/);
-  assert.match(route, /tenantSkillPaths: publishedTenantSkillPaths\(auth\)/);
+  assert.match(route, /const tenantSkillPaths = publishedTenantSkillPaths\(auth\)/);
+  assert.match(route, /tenantSkillPaths,/);
+  assert.match(route, /tenantWorkspaceRoot: tenantManagedWorkspaceRoot\(auth\)/);
 });

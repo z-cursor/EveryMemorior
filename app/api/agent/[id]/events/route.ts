@@ -1,6 +1,6 @@
 import { createAgentEventStream } from "@/lib/agent-event-stream";
 import { resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, isPersistedTenantSession, startRpcSession } from "@/lib/rpc-manager";
+import { ensureRpcSessionTenantSkills, getRpcSession, isPersistedTenantSession, startRpcSession, TenantSkillSnapshotError } from "@/lib/rpc-manager";
 import { authorizeAgentSessionFileRequest, authorizeAgentSessionRequest } from "@/lib/tenant-agent-runtime";
 import { canManageHostConfiguration, requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
 import { publishedTenantSkillPaths } from "@/lib/tenant-skills";
@@ -20,11 +20,16 @@ export async function GET(
   try {
     const auth = requireTenantSession(req);
     const hostAccess = canManageHostConfiguration(auth);
+    const tenantSkillPaths = publishedTenantSkillPaths(auth);
     // Fast path: already-running session
     let session = getRpcSession(id);
     let sessionPromise;
     if (session?.isAlive()) {
       authorizeAgentSessionRequest(req, id, session.cwd);
+      session = await ensureRpcSessionTenantSkills(session, tenantSkillPaths);
+      if (!session) sessionPromise = undefined;
+    }
+    if (session?.isAlive()) {
       if (!session.isTenantIsolated()) {
         // Dev hot reload can leave an idle wrapper created before tenant
         // isolation was enabled. Reopen it with the current policy; never
@@ -52,7 +57,7 @@ export async function GET(
           initialSessionId: id,
           toolNames: hostAccess ? undefined : [],
           tenantIsolated: true,
-          tenantSkillPaths: publishedTenantSkillPaths(auth),
+          tenantSkillPaths,
           tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
         }).then((result) => {
           if (!result.session.isTenantIsolated()) {
@@ -68,7 +73,7 @@ export async function GET(
         if (req.signal.aborted) return new Response(null, { status: 204 });
         sessionPromise = startRpcSession(id, filePath, undefined, {
           tenantIsolated: true,
-          tenantSkillPaths: publishedTenantSkillPaths(auth),
+          tenantSkillPaths,
           tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
         })
           .then((result) => {
@@ -91,7 +96,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    const status = error instanceof TenantAuthenticationError || error instanceof TenantSkillSnapshotError ? error.status : 500;
     return new Response(error instanceof Error ? error.message : String(error), { status });
   }
 }
