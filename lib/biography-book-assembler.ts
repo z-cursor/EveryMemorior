@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -94,6 +94,23 @@ async function findPolicy(workspaceRoot: string, skillPaths: readonly string[]):
   for (const root of [workspaceRoot, ...skillPaths]) {
     const file = join(root, "policies", "chapter-lengths.json");
     if (await exists(file)) return readJson(file);
+  }
+  // A published package may keep policies beside its declared `skills/`
+  // directory (for example `<release>/biography-agent-longform/policies`).
+  // Search only inside the immutable release roots and never follow symlinks.
+  const pending = skillPaths.map((root) => ({ root: resolve(root), depth: 0 }));
+  while (pending.length > 0) {
+    const { root, depth } = pending.shift()!;
+    if (depth >= 4) continue;
+    let entries;
+    try { entries = await readdir(root, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+      const child = join(root, entry.name);
+      const policy = join(child, "policies", "chapter-lengths.json");
+      if (await exists(policy)) return readJson(policy);
+      pending.push({ root: child, depth: depth + 1 });
+    }
   }
   return undefined;
 }

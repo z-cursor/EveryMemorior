@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { containsProhibitedCompanionProfileContent, containsSensitiveCompanionInformation, normalizedOrdinaryCompanionMemory, ordinaryCompanionTopics, ORDINARY_COMPANION_TOPIC_LABELS } from "./companion-memory-policy";
 import { calculateCompanionTrialMetrics, passesCompanionTrialGate } from "./companion-quality";
 
-export const TENANT_SCHEMA_VERSION = 8;
+export const TENANT_SCHEMA_VERSION = 10;
 
 export type TenantStatus = "active" | "suspended";
 export type UserStatus = "active" | "disabled";
@@ -14,6 +14,8 @@ export type TenantRole = "owner" | "admin" | "member";
 export type MembershipStatus = "active" | "suspended";
 export type WorkspaceStatus = "active" | "archived";
 export type TenantSkillStatus = "draft" | "pending_review" | "published" | "suspended" | "archived";
+/** State of the reviewed execution runtime associated with a Skill release. */
+export type TenantSkillBuildStatus = "pending" | "building" | "ready" | "failed";
 export type CompanionConfigStatus = "draft" | "published" | "archived";
 export type CompanionTurnStatus = "running" | "completed" | "incomplete" | "rejected" | "failed";
 export type CompanionClassification = "ordinary" | "current_fact" | "sensitive" | "professional" | "urgent_danger" | "abnormal";
@@ -149,9 +151,23 @@ export interface TenantSkill {
   description: string;
   status: TenantSkillStatus;
   version: number;
+  /** Immutable release identity; stored in the content_digest column for compatibility. */
+  releaseDigest: string;
   contentDigest: string;
   storagePath: string;
   manifest: Record<string, unknown>;
+  /** Digest of the preloaded runtime image selected for this release. */
+  imageDigest: string | null;
+  /** Local immutable image tag produced by the reviewed runtime builder. */
+  runtimeImage: string | null;
+  /** Digest of the dependency lockfiles used to build the runtime image. */
+  lockfileDigest: string | null;
+  /** Reviewed runtime profile (for example `node22-python3`). */
+  runtimeProfile: string | null;
+  buildStatus: TenantSkillBuildStatus;
+  buildError: string | null;
+  buildStartedAt: string | null;
+  buildCompletedAt: string | null;
   createdByMembershipId: string;
   reviewedByMembershipId: string | null;
   createdAt: string;
@@ -580,7 +596,15 @@ CREATE TABLE tenant_skills (
   FOREIGN KEY (tenant_id, created_by_membership_id) REFERENCES tenant_memberships(tenant_id, id),
   FOREIGN KEY (tenant_id, reviewed_by_membership_id) REFERENCES tenant_memberships(tenant_id, id)
 ) STRICT;
-INSERT INTO tenant_skills SELECT * FROM tenant_skills_v3;
+INSERT INTO tenant_skills (
+  id, tenant_id, slug, name, description, status, version, content_digest,
+  storage_path, manifest_json, created_by_membership_id, reviewed_by_membership_id,
+  created_at, published_at
+)
+SELECT id, tenant_id, slug, name, description, status, version, content_digest,
+  storage_path, manifest_json, created_by_membership_id, reviewed_by_membership_id,
+  created_at, published_at
+FROM tenant_skills_v3;
 DROP TABLE tenant_skills_v3;
 CREATE INDEX tenant_skills_listing_idx ON tenant_skills(tenant_id, created_by_membership_id, status, slug, version DESC);
 `;
@@ -898,10 +922,77 @@ CREATE UNIQUE INDEX IF NOT EXISTS companion_calibrations_item_idx
   ON companion_calibrations(tenant_id, run_id, item_id) WHERE item_id <> '';
 `;
 
+// Skill runtime metadata is deliberately kept beside the immutable release
+// record.  A build may complete asynchronously after upload/review, so the
+// status and diagnostics are mutable while the content and dependency
+// digests remain release facts.
+const MIGRATION_9 = `
+ALTER TABLE tenant_skills ADD COLUMN image_digest TEXT;
+ALTER TABLE tenant_skills ADD COLUMN runtime_image TEXT;
+ALTER TABLE tenant_skills ADD COLUMN lockfile_digest TEXT;
+ALTER TABLE tenant_skills ADD COLUMN runtime_profile TEXT;
+ALTER TABLE tenant_skills ADD COLUMN build_status TEXT NOT NULL DEFAULT 'pending'
+  CHECK (build_status IN ('pending', 'building', 'ready', 'failed'));
+ALTER TABLE tenant_skills ADD COLUMN build_error TEXT;
+ALTER TABLE tenant_skills ADD COLUMN build_started_at TEXT;
+ALTER TABLE tenant_skills ADD COLUMN build_completed_at TEXT;
+UPDATE tenant_skills
+SET build_status = 'ready'
+WHERE json_extract(manifest_json, '$.declarative') = 1;
+`;
+
+// Version 9 was briefly shipped with the schema version bumped before all of
+// these columns were present.  Keep this repair separate from MIGRATION_9 so
+// databases that already recorded version 9 can recover without dropping
+// tenant Skill releases.  Every statement is guarded by table_info, making the
+// repair safe to run again when a hot-reloaded process opens the database.
+const MIGRATION_10 = "-- Tenant Skill runtime metadata repair is applied by migrate()";
+
 function requiredText(value: string, field: string): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${field} is required`);
   return normalized;
+}
+
+function optionalRuntimeDigest(value: string | null | undefined, field: string): string | null {
+  if (value == null || value.trim() === "") return null;
+  const normalized = value.trim().toLowerCase();
+  if (!/^sha256:[0-9a-f]{64}$/.test(normalized)) throw new Error(`${field} must be a sha256 digest`);
+  return normalized;
+}
+
+function optionalLockfileDigest(value: string | null | undefined): string | null {
+  if (value == null || value.trim() === "") return null;
+  const normalized = value.trim().toLowerCase();
+  // Lockfile digests are also emitted by the runtime resolver as bare hex,
+  // while image digests use Docker's sha256: prefix. Accept both forms so
+  // release metadata can be copied without a lossy format conversion.
+  if (!/^(?:sha256:)?[0-9a-f]{64}$/.test(normalized)) throw new Error("lockfileDigest must be a sha256 digest");
+  return normalized;
+}
+
+function optionalRuntimeProfile(value: string | null | undefined): string | null {
+  if (value == null || value.trim() === "") return null;
+  const normalized = value.trim();
+  if (normalized.length > 128 || [...normalized].some((char) => char.charCodeAt(0) < 0x20 || char === "\u007f" || char === "\0")) {
+    throw new Error("runtimeProfile is invalid");
+  }
+  return normalized;
+}
+
+function optionalRuntimeImage(value: string | null | undefined): string | null {
+  if (value == null || value.trim() === "") return null;
+  const normalized = value.trim();
+  if (normalized.length > 256 || [...normalized].some((char) => char.charCodeAt(0) < 0x20 || char === "\u007f" || char === "\0")) {
+    throw new Error("runtimeImage is invalid");
+  }
+  return normalized;
+}
+
+function validTenantSkillBuildStatus(value: TenantSkillBuildStatus | undefined): TenantSkillBuildStatus | undefined {
+  if (value === undefined) return undefined;
+  if (!["pending", "building", "ready", "failed"].includes(value)) throw new Error("Invalid Skill build status");
+  return value;
 }
 
 function visibleLineDiff(before: string, after: string): string {
@@ -1024,8 +1115,16 @@ function mapTenantSkill(row: SqlRow): TenantSkill {
     id: asString(row, "id"), tenantId: asString(row, "tenant_id"), slug: asString(row, "slug"),
     name: asString(row, "name"), description: asString(row, "description"),
     status: asString(row, "status") as TenantSkillStatus, version: Number(row.version),
-    contentDigest: asString(row, "content_digest"), storagePath: asString(row, "storage_path"),
+    releaseDigest: asString(row, "content_digest"), contentDigest: asString(row, "content_digest"), storagePath: asString(row, "storage_path"),
     manifest: JSON.parse(asString(row, "manifest_json")) as Record<string, unknown>,
+    imageDigest: row.image_digest as string | null,
+    runtimeImage: row.runtime_image as string | null,
+    lockfileDigest: row.lockfile_digest as string | null,
+    runtimeProfile: row.runtime_profile as string | null,
+    buildStatus: asString(row, "build_status") as TenantSkillBuildStatus,
+    buildError: row.build_error as string | null,
+    buildStartedAt: row.build_started_at as string | null,
+    buildCompletedAt: row.build_completed_at as string | null,
     createdByMembershipId: asString(row, "created_by_membership_id"),
     reviewedByMembershipId: row.reviewed_by_membership_id as string | null,
     createdAt: asString(row, "created_at"), publishedAt: row.published_at as string | null,
@@ -1142,16 +1241,34 @@ declare global {
 
 export function getTenantStore(): TenantStore {
   const path = getTenantDatabasePath();
-  if (
-    !globalThis.__piTenantStore
-    || globalThis.__piTenantStorePath !== path
-    || globalThis.__piTenantStore.schemaVersion() < TENANT_SCHEMA_VERSION
-  ) {
-    globalThis.__piTenantStore?.close();
+  const current = globalThis.__piTenantStore;
+  // Next's development runtime preserves globalThis across hot reloads.  A
+  // store created by the previous module can therefore have the old class
+  // shape (without resumeTenantSkill) and an open connection to a database
+  // whose user_version was bumped before the runtime columns were installed.
+  // Validate both the API seam and the physical columns before reusing it.
+  let stale = !current || globalThis.__piTenantStorePath !== path;
+  if (current && !stale) {
+    try {
+      const schemaVersion = typeof current.schemaVersion === "function" ? current.schemaVersion() : -1;
+      stale = schemaVersion < TENANT_SCHEMA_VERSION
+        || typeof current.resumeTenantSkill !== "function"
+        || typeof current.hasTenantSkillRuntimeColumns !== "function"
+        || typeof current.repairManagedWorkspaceOwnership !== "function"
+        || typeof current.repairAgentSessionBindingOwnership !== "function"
+        || !current.hasTenantSkillRuntimeColumns();
+    } catch {
+      // A hot-reloaded connection can be closed or hold an invalidated schema.
+      // Reopening it is safe because TenantStore.migrate() is idempotent.
+      stale = true;
+    }
+  }
+  if (stale) {
+    try { current?.close(); } catch { /* The stale connection may already be closed. */ }
     globalThis.__piTenantStore = new TenantStore(path);
     globalThis.__piTenantStorePath = path;
   }
-  return globalThis.__piTenantStore;
+  return globalThis.__piTenantStore as TenantStore;
 }
 
 export function closeTenantStore(): void {
@@ -1183,6 +1300,73 @@ export class TenantStore {
   schemaVersion(): number {
     const row = this.database.prepare("PRAGMA user_version").get() as SqlRow;
     return Number(row.user_version);
+  }
+
+  /** Return whether the Skill runtime columns exist on this connection. */
+  hasTenantSkillRuntimeColumns(): boolean {
+    const columns = new Set(
+      (this.database.prepare("PRAGMA table_info(tenant_skills)").all() as SqlRow[])
+        .map((row) => String(row.name)),
+    );
+    return [
+      "image_digest", "runtime_image", "lockfile_digest", "runtime_profile",
+      "build_status", "build_error", "build_started_at", "build_completed_at",
+    ].every((column) => columns.has(column));
+  }
+
+  /**
+   * Repair workspace ownership recorded by the old host-path adoption path.
+   * Managed and companion roots encode their membership in the directory
+   * identity, so that identity is authoritative even when the old row was
+   * created under the installation owner.
+   */
+  repairManagedWorkspaceOwnership(): void {
+    const workspaces = this.database.prepare("SELECT id, tenant_id, root_path, created_by_membership_id FROM workspaces").all() as SqlRow[];
+    const memberships = this.database.prepare("SELECT tenant_id, id FROM tenant_memberships").all() as SqlRow[];
+    const agentDir = getAgentDir();
+    const isWithin = (root: string, target: string): boolean => {
+      const suffix = relative(root, target);
+      return suffix === "" || (!isAbsolute(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep}`));
+    };
+    for (const workspace of workspaces) {
+      const tenantId = asString(workspace, "tenant_id");
+      const rootPath = asString(workspace, "root_path");
+      const owner = memberships.find((membership) => {
+        if (asString(membership, "tenant_id") !== tenantId) return false;
+        const membershipId = asString(membership, "id");
+        return isWithin(join(agentDir, "tenant-workspaces", tenantId, membershipId), rootPath)
+          || isWithin(join(agentDir, "companion-sessions", tenantId, membershipId), rootPath);
+      });
+      if (!owner) continue;
+      const membershipId = asString(owner, "id");
+      if (membershipId === asString(workspace, "created_by_membership_id")) continue;
+      this.database.prepare("UPDATE workspaces SET created_by_membership_id = ?, updated_at = ? WHERE tenant_id = ? AND id = ?")
+        .run(membershipId, new Date().toISOString(), tenantId, asString(workspace, "id"));
+    }
+  }
+
+  /**
+   * Repair bindings written by the old legacy-adoption path. A session bound
+   * to a workspace must belong to that workspace's creator; otherwise one
+   * account can inherit another account's session after a creation race.
+   */
+  repairAgentSessionBindingOwnership(): void {
+    this.database.prepare(`
+      UPDATE agent_session_bindings
+      SET created_by_membership_id = (
+        SELECT w.created_by_membership_id
+        FROM workspaces w
+        WHERE w.tenant_id = agent_session_bindings.tenant_id
+          AND w.id = agent_session_bindings.workspace_id
+      )
+      WHERE EXISTS (
+        SELECT 1
+        FROM workspaces w
+        WHERE w.tenant_id = agent_session_bindings.tenant_id
+          AND w.id = agent_session_bindings.workspace_id
+          AND w.created_by_membership_id <> agent_session_bindings.created_by_membership_id
+      )
+    `).run();
   }
 
   createTenantWithOwner(input: CreateTenantWithOwnerInput): {
@@ -1557,6 +1741,14 @@ export class TenantStore {
     return row ? mapWorkspace(row) : null;
   }
 
+  getWorkspaceByRoot(tenantId: string, rootPath: string): Workspace | null {
+    const row = this.database.prepare(`
+      SELECT id, tenant_id, slug, name, root_path, status, created_by_membership_id, created_at, updated_at
+      FROM workspaces WHERE tenant_id = ? AND root_path = ?
+    `).get(tenantId, rootPath) as SqlRow | undefined;
+    return row ? mapWorkspace(row) : null;
+  }
+
   listActiveWorkspaces(tenantId: string): Workspace[] {
     const rows = this.database.prepare(`
       SELECT id, tenant_id, slug, name, root_path, status, created_by_membership_id, created_at, updated_at
@@ -1595,12 +1787,49 @@ export class TenantStore {
     return rows.map((row) => asString(row, "root_path"));
   }
 
+  /** Active workspace roots owned by one signed-in membership. */
+  listActiveWorkspaceRootsForMembership(tenantId: string, membershipId: string): string[] {
+    const rows = this.database.prepare(`
+      SELECT root_path FROM workspaces
+      WHERE tenant_id = ? AND created_by_membership_id = ? AND status = 'active'
+      ORDER BY created_at ASC
+    `).all(tenantId, membershipId) as SqlRow[];
+    return rows.map((row) => asString(row, "root_path"));
+  }
+
+  listActiveWorkspacesForMembership(tenantId: string, membershipId: string): Workspace[] {
+    const rows = this.database.prepare(`
+      SELECT id, tenant_id, slug, name, root_path, status, created_by_membership_id, created_at, updated_at
+      FROM workspaces
+      WHERE tenant_id = ? AND created_by_membership_id = ? AND status = 'active'
+      ORDER BY updated_at DESC
+    `).all(tenantId, membershipId) as SqlRow[];
+    return rows.map(mapWorkspace);
+  }
+
   bindAgentSession(
     context: TenantContext,
     workspaceId: string,
     agentSessionId: string,
   ): AgentSessionBinding {
     this.requireActiveMembership(context);
+    const existing = this.getAgentSessionBindingAnyTenant(agentSessionId);
+    if (existing) {
+      if (existing.tenantId !== context.tenantId || existing.createdByMembershipId !== context.membershipId) {
+        throw new Error("Agent session belongs to another tenant");
+      }
+      if (existing.workspaceId !== workspaceId) {
+        throw new Error("Agent session is already bound to another workspace");
+      }
+      if (existing.workspaceStatus !== "active") {
+        throw new Error("Agent session workspace is archived");
+      }
+      return existing;
+    }
+    const workspace = this.getWorkspace(context.tenantId, workspaceId);
+    if (!workspace || workspace.status !== "active" || workspace.createdByMembershipId !== context.membershipId) {
+      throw new Error("Workspace is not available to this account");
+    }
     const now = new Date().toISOString();
     this.database.prepare(`
       INSERT INTO agent_session_bindings (
@@ -1624,13 +1853,35 @@ export class TenantStore {
     return row ? mapBinding(row) : null;
   }
 
+  /** Look up ownership even when the bound workspace was archived. */
+  getAgentSessionBindingAnyTenant(agentSessionId: string): AgentSessionBinding & {
+    workspacePath: string;
+    workspaceStatus: WorkspaceStatus;
+  } | null {
+    const row = this.database.prepare(`
+      SELECT b.agent_session_id, b.tenant_id, b.workspace_id,
+             b.created_by_membership_id, b.created_at,
+             w.root_path, w.status
+      FROM agent_session_bindings b
+      JOIN workspaces w ON w.tenant_id = b.tenant_id AND w.id = b.workspace_id
+      WHERE b.agent_session_id = ?
+    `).get(agentSessionId) as SqlRow | undefined;
+    return row ? {
+      ...mapBinding(row),
+      workspacePath: asString(row, "root_path"),
+      workspaceStatus: asString(row, "status") as WorkspaceStatus,
+    } : null;
+  }
+
   getAgentSessionExecution(agentSessionId: string): (AgentSessionBinding & { workspacePath: string }) | null {
     const row = this.database.prepare(`
       SELECT b.agent_session_id, b.tenant_id, b.workspace_id,
              b.created_by_membership_id, b.created_at, w.root_path
       FROM agent_session_bindings b
       JOIN workspaces w ON w.tenant_id = b.tenant_id AND w.id = b.workspace_id
-      WHERE b.agent_session_id = ? AND w.status = 'active'
+      WHERE b.agent_session_id = ?
+        AND w.status = 'active'
+        AND b.created_by_membership_id = w.created_by_membership_id
     `).get(agentSessionId) as SqlRow | undefined;
     return row ? { ...mapBinding(row), workspacePath: asString(row, "root_path") } : null;
   }
@@ -1641,7 +1892,16 @@ export class TenantStore {
 
   createTenantSkillDraft(context: TenantContext, input: {
     slug: string; name: string; description: string; contentDigest: string;
+    releaseDigest?: string;
     storagePath: string; manifest: Record<string, unknown>;
+    imageDigest?: string | null;
+    runtimeImage?: string | null;
+    lockfileDigest?: string | null;
+    runtimeProfile?: string | null;
+    buildStatus?: TenantSkillBuildStatus;
+    buildError?: string | null;
+    buildStartedAt?: string | null;
+    buildCompletedAt?: string | null;
   }): TenantSkill {
     const actor = this.requireActiveMembership(context);
     const slug = normalizedSlug(input.slug, "skill.slug");
@@ -1650,13 +1910,27 @@ export class TenantStore {
     ).get(context.tenantId, context.membershipId, slug) as SqlRow).version);
     const now = new Date().toISOString();
     const id = randomUUID();
+    const imageDigest = optionalRuntimeDigest(input.imageDigest, "imageDigest");
+    const runtimeImage = optionalRuntimeImage(input.runtimeImage);
+    const lockfileDigest = optionalLockfileDigest(input.lockfileDigest);
+    const runtimeProfile = optionalRuntimeProfile(input.runtimeProfile);
+    // Declarative releases never need an image build.  Marking those ready
+    // keeps the existing personal-Skill fast path while executable releases
+    // stay pending until a reviewed runtime has been produced.
+    const buildStatus = validTenantSkillBuildStatus(input.buildStatus)
+      || (input.manifest.declarative === true ? "ready" : "pending");
+    const releaseDigest = input.releaseDigest?.trim() || input.contentDigest;
     this.database.prepare(`
       INSERT INTO tenant_skills (
         id, tenant_id, slug, name, description, status, version, content_digest,
-        storage_path, manifest_json, created_by_membership_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
+        storage_path, manifest_json, image_digest, runtime_image, lockfile_digest, runtime_profile,
+        build_status, build_error, build_started_at, build_completed_at,
+        created_by_membership_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, context.tenantId, slug, requiredText(input.name, "skill.name"), input.description.trim(), version,
-      input.contentDigest, input.storagePath, JSON.stringify(input.manifest), context.membershipId, now);
+      releaseDigest, input.storagePath, JSON.stringify(input.manifest), imageDigest, runtimeImage, lockfileDigest,
+      runtimeProfile, buildStatus, input.buildError?.trim() || null, input.buildStartedAt ?? null,
+      input.buildCompletedAt ?? null, context.membershipId, now);
     this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "tenant.skill.created", "tenant_skill", id, now);
     return this.getTenantSkill(context.tenantId, id)!;
   }
@@ -1667,18 +1941,100 @@ export class TenantStore {
     return row ? mapTenantSkill(row) : null;
   }
 
+  /**
+   * Look up an immutable release by its content digest.  Upload paths are
+   * deterministic, so a retry of the same archive should be idempotent even
+   * when its first request completed the filesystem write before the response
+   * was lost.
+   */
+  findTenantSkillByContentDigest(tenantId: string, membershipId: string, contentDigest: string): TenantSkill | null {
+    const row = this.database.prepare("SELECT * FROM tenant_skills WHERE tenant_id = ? AND created_by_membership_id = ? AND content_digest = ?")
+      .get(tenantId, membershipId, contentDigest) as SqlRow | undefined;
+    return row ? mapTenantSkill(row) : null;
+  }
+
+  /**
+   * Record the result of the reviewed runtime build for an immutable Skill
+   * release.  The archive itself is never changed; only build metadata moves
+   * through pending -> building -> ready/failed.
+   */
+  updateTenantSkillBuild(context: TenantContext, skillId: string, input: {
+    status: TenantSkillBuildStatus;
+    imageDigest?: string | null;
+    runtimeImage?: string | null;
+    lockfileDigest?: string | null;
+    runtimeProfile?: string | null;
+    error?: string | null;
+    startedAt?: string | null;
+    completedAt?: string | null;
+  }): TenantSkill {
+    const actor = this.requireActiveMembership(context);
+    const skill = this.getTenantSkill(context.tenantId, skillId);
+    if (!skill || skill.status === "archived" || (skill.createdByMembershipId !== context.membershipId
+      && actor.role !== "owner" && actor.role !== "admin")) {
+      throw new Error("Skill release not found");
+    }
+    const status = validTenantSkillBuildStatus(input.status);
+    if (!status) throw new Error("Skill build status is required");
+    const now = new Date().toISOString();
+    const imageDigest = input.imageDigest === undefined
+      ? skill.imageDigest : optionalRuntimeDigest(input.imageDigest, "imageDigest");
+    const runtimeImage = input.runtimeImage === undefined
+      ? skill.runtimeImage : optionalRuntimeImage(input.runtimeImage);
+    const lockfileDigest = input.lockfileDigest === undefined
+      ? skill.lockfileDigest : optionalLockfileDigest(input.lockfileDigest);
+    const runtimeProfile = input.runtimeProfile === undefined
+      ? skill.runtimeProfile : optionalRuntimeProfile(input.runtimeProfile);
+    const buildStartedAt = input.startedAt === undefined
+      ? (status === "building" ? skill.buildStartedAt ?? now : status === "pending" ? null : skill.buildStartedAt)
+      : input.startedAt;
+    const buildCompletedAt = input.completedAt === undefined
+      ? ((status === "ready" || status === "failed") ? now : skill.buildCompletedAt)
+      : input.completedAt;
+    const error = input.error === undefined ? skill.buildError : input.error?.trim() || null;
+    if (status === "ready" && skill.manifest.runtimeRequired === true && skill.manifest.declarative !== true
+      && (!imageDigest || !runtimeImage || !lockfileDigest || !runtimeProfile)) {
+      throw new Error("Executable Skill runtime metadata is incomplete");
+    }
+    this.database.prepare(`UPDATE tenant_skills SET
+      image_digest = ?, runtime_image = ?, lockfile_digest = ?, runtime_profile = ?, build_status = ?,
+      build_error = ?, build_started_at = ?, build_completed_at = ?
+      WHERE tenant_id = ? AND id = ?`).run(
+      imageDigest, runtimeImage, lockfileDigest, runtimeProfile, status, error,
+      buildStartedAt, buildCompletedAt, context.tenantId, skillId,
+    );
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, `tenant.skill.build_${status}`, "tenant_skill", skillId, now);
+    return this.getTenantSkill(context.tenantId, skillId)!;
+  }
+
   listPublishedTenantSkillPaths(tenantId: string, membershipId: string): string[] {
     const rows = this.database.prepare(`SELECT storage_path FROM tenant_skills
       WHERE tenant_id = ? AND created_by_membership_id = ? AND status = 'published'
-        AND version = (SELECT MAX(v.version) FROM tenant_skills v WHERE v.tenant_id = tenant_skills.tenant_id AND v.created_by_membership_id = tenant_skills.created_by_membership_id AND v.slug = tenant_skills.slug AND v.status = 'published')
+        AND build_status = 'ready'
+        AND version = (SELECT MAX(v.version) FROM tenant_skills v WHERE v.tenant_id = tenant_skills.tenant_id AND v.created_by_membership_id = tenant_skills.created_by_membership_id AND v.slug = tenant_skills.slug AND v.status = 'published' AND v.build_status = 'ready')
       ORDER BY slug COLLATE NOCASE, version DESC`).all(tenantId, membershipId) as SqlRow[];
     return rows.map((row) => asString(row, "storage_path"));
+  }
+
+  listPublishedTenantSkills(tenantId: string, membershipId: string, includeAll = false): TenantSkill[] {
+    const rows = this.database.prepare(`SELECT * FROM tenant_skills AS skill
+      WHERE skill.tenant_id = ? AND skill.status = 'published' AND skill.build_status = 'ready'
+        ${includeAll ? "" : "AND skill.created_by_membership_id = ?"}
+        AND skill.version = (SELECT MAX(v.version) FROM tenant_skills AS v
+          WHERE v.tenant_id = skill.tenant_id
+            AND v.created_by_membership_id = skill.created_by_membership_id
+            AND v.slug = skill.slug AND v.status = 'published' AND v.build_status = 'ready')
+      ORDER BY skill.slug COLLATE NOCASE, skill.version DESC`).all(...(includeAll
+        ? [tenantId]
+        : [tenantId, membershipId])) as SqlRow[];
+    return rows.map(mapTenantSkill);
   }
 
   listPublishedTenantSkillPathsForTenant(tenantId: string): string[] {
     const rows = this.database.prepare(`SELECT storage_path FROM tenant_skills
       WHERE tenant_id = ? AND status = 'published'
-        AND version = (SELECT MAX(v.version) FROM tenant_skills v WHERE v.tenant_id = tenant_skills.tenant_id AND v.created_by_membership_id = tenant_skills.created_by_membership_id AND v.slug = tenant_skills.slug AND v.status = 'published')
+        AND build_status = 'ready'
+        AND version = (SELECT MAX(v.version) FROM tenant_skills v WHERE v.tenant_id = tenant_skills.tenant_id AND v.created_by_membership_id = tenant_skills.created_by_membership_id AND v.slug = tenant_skills.slug AND v.status = 'published' AND v.build_status = 'ready')
       ORDER BY slug COLLATE NOCASE, version DESC`).all(tenantId) as SqlRow[];
     return rows.map((row) => asString(row, "storage_path"));
   }
@@ -1687,11 +2043,32 @@ export class TenantStore {
     const membership = this.requireActiveMembership(context);
     const mayGovern = includeAll && membership.role !== "member";
     const rows = this.database.prepare(`SELECT * FROM tenant_skills WHERE tenant_id = ?
+      AND status <> 'archived'
       ${mayGovern ? "" : "AND created_by_membership_id = ?"}
       ORDER BY slug COLLATE NOCASE, version DESC`).all(...(mayGovern
         ? [context.tenantId]
         : [context.tenantId, context.membershipId])) as SqlRow[];
     return rows.map(mapTenantSkill);
+  }
+
+  /**
+   * Remove a user-uploaded release from the active catalog while retaining its
+   * immutable record and audit trail. Owners and admins may remove any release
+   * in the tenant; members may remove only their own releases.
+   */
+  archiveTenantSkill(context: TenantContext, skillId: string): TenantSkill {
+    const actor = this.requireActiveMembership(context);
+    const skill = this.getTenantSkill(context.tenantId, skillId);
+    if (!skill || skill.status === "archived"
+      || (skill.createdByMembershipId !== context.membershipId
+        && actor.role !== "owner" && actor.role !== "admin")) {
+      throw new Error("Skill release not found");
+    }
+    const now = new Date().toISOString();
+    this.database.prepare("UPDATE tenant_skills SET status = 'archived' WHERE tenant_id = ? AND id = ?")
+      .run(context.tenantId, skillId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "tenant.skill.archived", "tenant_skill", skillId, now);
+    return this.getTenantSkill(context.tenantId, skillId)!;
   }
 
   submitTenantSkillForReview(context: TenantContext, skillId: string): TenantSkill {
@@ -1722,6 +2099,24 @@ export class TenantStore {
     const actor = this.requireTenantAdmin(context);
     const skill = this.getTenantSkill(context.tenantId, skillId);
     if (!skill || skill.status !== "pending_review") throw new Error("Skill is not pending review");
+    if (skill.manifest.declarative !== true && skill.buildStatus !== "ready") {
+      throw new Error("Skill runtime artifact is not ready");
+    }
+    if (skill.manifest.runtimeRequired === true && skill.manifest.declarative !== true
+      && (!skill.imageDigest || !skill.runtimeImage || !skill.lockfileDigest || !skill.runtimeProfile)) {
+      throw new Error("Skill runtime artifact metadata is incomplete");
+    }
+    if (skill.manifest.runtimeRequired === true && skill.manifest.declarative !== true) {
+      const incompatible = this.database.prepare(`SELECT 1 FROM tenant_skills
+        WHERE tenant_id = ? AND status = 'published' AND id <> ?
+          AND json_extract(manifest_json, '$.runtimeRequired') = 1
+          AND runtime_image IS NOT NULL AND image_digest IS NOT NULL AND runtime_profile IS NOT NULL
+          AND (runtime_image <> ? OR image_digest <> ? OR runtime_profile <> ?)
+        LIMIT 1`).get(
+        context.tenantId, skillId, skill.runtimeImage, skill.imageDigest, skill.runtimeProfile,
+      );
+      if (incompatible) throw new Error("Skill runtime artifact is incompatible with published releases");
+    }
     const now = new Date().toISOString();
     this.database.prepare(`UPDATE tenant_skills SET status = 'published', reviewed_by_membership_id = ?, published_at = ?
       WHERE tenant_id = ? AND id = ?`).run(context.membershipId, now, context.tenantId, skillId);
@@ -1737,6 +2132,25 @@ export class TenantStore {
     this.database.prepare("UPDATE tenant_skills SET status = 'suspended' WHERE tenant_id = ? AND id = ?")
       .run(context.tenantId, skillId);
     this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "tenant.skill.suspended", "tenant_skill", skillId, now);
+    return this.getTenantSkill(context.tenantId, skillId)!;
+  }
+
+  /** Re-enable a suspended release without changing its immutable archive. */
+  resumeTenantSkill(context: TenantContext, skillId: string): TenantSkill {
+    const actor = this.requireTenantAdmin(context);
+    const skill = this.getTenantSkill(context.tenantId, skillId);
+    if (!skill || skill.status !== "suspended") throw new Error("Suspended skill not found");
+    if (skill.manifest.declarative !== true && skill.buildStatus !== "ready") {
+      throw new Error("Skill runtime artifact is not ready");
+    }
+    if (skill.manifest.runtimeRequired === true && skill.manifest.declarative !== true
+      && (!skill.imageDigest || !skill.runtimeImage || !skill.lockfileDigest || !skill.runtimeProfile)) {
+      throw new Error("Skill runtime artifact metadata is incomplete");
+    }
+    const now = new Date().toISOString();
+    this.database.prepare("UPDATE tenant_skills SET status = 'published', published_at = ? WHERE tenant_id = ? AND id = ?")
+      .run(now, context.tenantId, skillId);
+    this.insertAuditEvent(context.tenantId, actor.userId, actor.id, "tenant.skill.resumed", "tenant_skill", skillId, now);
     return this.getTenantSkill(context.tenantId, skillId)!;
   }
 
@@ -2856,16 +3270,19 @@ export class TenantStore {
     return mapCompanionBackgroundJob(this.database.prepare("SELECT * FROM companion_background_jobs WHERE tenant_id = ? AND id = ?").get(context.tenantId, jobId) as SqlRow);
   }
 
-  ensureWorkspace(context: TenantContext, input: Omit<CreateWorkspaceInput, "slug">): Workspace {
+  ensureWorkspace(
+    context: TenantContext,
+    input: Omit<CreateWorkspaceInput, "slug">,
+    options: { reviveArchived?: boolean } = {},
+  ): Workspace {
     this.requireActiveMembership(context);
-    const existing = this.database.prepare(`
-      SELECT id, tenant_id, slug, name, root_path, status,
-             created_by_membership_id, created_at, updated_at
-      FROM workspaces WHERE tenant_id = ? AND root_path = ?
-    `).get(context.tenantId, input.rootPath) as SqlRow | undefined;
+    const existing = this.getWorkspaceByRoot(context.tenantId, input.rootPath);
     if (existing) {
-      const workspace = mapWorkspace(existing);
-      if (workspace.status === "archived") {
+      const workspace = existing;
+      if (workspace.createdByMembershipId !== context.membershipId) {
+        throw new Error("Workspace belongs to another account");
+      }
+      if (workspace.status === "archived" && options.reviveArchived !== false) {
         this.database.prepare(`
           UPDATE workspaces SET status = 'active', archived_at = NULL, updated_at = ?
           WHERE tenant_id = ? AND id = ?
@@ -2991,8 +3408,18 @@ export class TenantStore {
     if (current > TENANT_SCHEMA_VERSION) {
       throw new Error(`Tenant database schema ${current} is newer than supported ${TENANT_SCHEMA_VERSION}`);
     }
-    if (current === TENANT_SCHEMA_VERSION) return;
-    const migrations = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8];
+    if (current === TENANT_SCHEMA_VERSION) {
+      // A previous release recorded version 9 before adding all Skill runtime
+      // columns.  Keep this check on the equal-version path as a last-resort
+      // repair for databases that were upgraded by that release.
+      this.transaction(() => {
+        this.repairTenantSkillRuntimeColumns();
+        this.repairManagedWorkspaceOwnership();
+        this.repairAgentSessionBindingOwnership();
+      });
+      return;
+    }
+    const migrations = [MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7, MIGRATION_8, MIGRATION_9, MIGRATION_10];
     this.transaction(() => {
       for (let index = current; index < migrations.length; index += 1) {
         if (index === 7) {
@@ -3001,10 +3428,54 @@ export class TenantStore {
           const calibrationColumns = this.database.prepare("PRAGMA table_info(companion_calibrations)").all() as SqlRow[];
           if (!calibrationColumns.some((row) => row.name === "item_id")) this.database.exec("ALTER TABLE companion_calibrations ADD COLUMN item_id TEXT NOT NULL DEFAULT ''");
         }
-        this.database.exec(migrations[index]);
+        if (index === 9) this.repairTenantSkillRuntimeColumns();
+        else this.database.exec(migrations[index]);
       }
+      this.repairManagedWorkspaceOwnership();
+      this.repairAgentSessionBindingOwnership();
       this.database.exec(`PRAGMA user_version = ${TENANT_SCHEMA_VERSION}`);
     });
+  }
+
+  /** Repair runtime columns after the version-9 migration was applied incompletely. */
+  private repairTenantSkillRuntimeColumns(): void {
+    const columns = new Set(
+      (this.database.prepare("PRAGMA table_info(tenant_skills)").all() as SqlRow[])
+        .map((row) => String(row.name)),
+    );
+    // A database older than the Skill tables is handled by MIGRATION_3 before
+    // this method is reached.  The guard keeps equal-version recovery safe for
+    // partially initialized development databases.
+    if (!columns.size) return;
+    if (!columns.has("image_digest")) this.database.exec("ALTER TABLE tenant_skills ADD COLUMN image_digest TEXT");
+    if (!columns.has("runtime_image")) this.database.exec("ALTER TABLE tenant_skills ADD COLUMN runtime_image TEXT");
+    if (!columns.has("lockfile_digest")) this.database.exec("ALTER TABLE tenant_skills ADD COLUMN lockfile_digest TEXT");
+    if (!columns.has("runtime_profile")) this.database.exec("ALTER TABLE tenant_skills ADD COLUMN runtime_profile TEXT");
+    if (!columns.has("build_status")) {
+      this.database.exec("ALTER TABLE tenant_skills ADD COLUMN build_status TEXT NOT NULL DEFAULT 'pending' CHECK (build_status IN ('pending', 'building', 'ready', 'failed'))");
+    }
+    if (!columns.has("build_error")) this.database.exec("ALTER TABLE tenant_skills ADD COLUMN build_error TEXT");
+    if (!columns.has("build_started_at")) this.database.exec("ALTER TABLE tenant_skills ADD COLUMN build_started_at TEXT");
+    if (!columns.has("build_completed_at")) this.database.exec("ALTER TABLE tenant_skills ADD COLUMN build_completed_at TEXT");
+
+    // Declarative releases need no image.  An executable release without the
+    // complete metadata is deliberately pending so it cannot execute before a
+    // reviewed image has been built and cached.
+    this.database.exec(`
+      UPDATE tenant_skills
+      SET build_status = CASE
+        WHEN COALESCE(json_extract(manifest_json, '$.declarative'), 0) = 1 THEN 'ready'
+        WHEN image_digest IS NOT NULL AND runtime_image IS NOT NULL
+          AND lockfile_digest IS NOT NULL AND runtime_profile IS NOT NULL
+          AND build_status = 'ready' THEN 'ready'
+        ELSE 'pending'
+      END
+      WHERE COALESCE(json_extract(manifest_json, '$.declarative'), 0) = 1
+        OR build_status IS NULL OR build_status NOT IN ('pending', 'building', 'ready', 'failed')
+        OR (COALESCE(json_extract(manifest_json, '$.declarative'), 0) <> 1
+          AND (image_digest IS NULL OR runtime_image IS NULL OR lockfile_digest IS NULL OR runtime_profile IS NULL)
+          AND build_status = 'ready')
+    `);
   }
 
   private requireActiveMembership(context: TenantContext): Membership {

@@ -51,6 +51,9 @@ For port and hostname, command-line options override the corresponding environme
 | `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 | `PI_MODEL_MAX_ACTIVE` | Maximum model turns running across all sessions in this Pi Web process; excess turns wait in FIFO order | `8` |
+| `PI_WEB_SKILL_LLM_TIMEOUT_SECONDS` | Timeout for one model request inside an execution-based Skill | `600` seconds |
+| `PI_WEB_SKILL_STAGE_TIMEOUT_SECONDS` | Minimum timeout for one named Skill worker stage | `600` seconds |
+| `PI_WEB_SKILL_EXECUTION_TIMEOUT_SECONDS` | Host deadline for one complete Skill bridge invocation | `2400` seconds (40 min) |
 
 For example:
 

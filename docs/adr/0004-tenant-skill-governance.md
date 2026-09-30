@@ -19,10 +19,14 @@ Agent startup resolves that membership's active Skill set and command execution
 remains inside the tenant Agent Sandbox.
 
 Phase 1 accepts ZIP packages containing `SKILL.md`, static resources, scripts,
-and runtime metadata such as package manifests or Dockerfiles. Uploading those
-files does not install dependencies or execute them. Skills are mounted
-read-only in the Agent Sandbox, which keeps host execution, network, and secrets
-unavailable. Declarative Skills can be activated by their uploader; versions
+and dependency lockfiles. Uploading those files does not install dependencies or
+execute them. When a release enters review, a generated, server-owned runtime
+recipe resolves supported lockfiles asynchronously and caches an image
+identified by its image and lockfile digests. A release is never installed on
+the first Agent invocation: sessions fail closed while the artifact is pending
+or failed. Skills are mounted read-only in the Agent Sandbox, which keeps host
+execution, network, and secrets unavailable during execution. Declarative Skills
+can be activated by their uploader; versions
 containing scripts remain drafts until Admin/Owner publishes them. Admin
 governance visibility is separate from the normal personal Skill list.
 
@@ -31,5 +35,12 @@ governance visibility is separate from the normal personal Skill list.
 - The host-wide Skill registry remains installation-owned.
 - Published content is tenant- and membership-scoped and cannot cross user or tenant lookups.
 - Versions are never edited in place, making rollback and audit possible.
-- Dependency installation, network capabilities, and secret brokers are deferred
-  until a separate capability policy exists.
+- Dependency installation happens only in the reviewed asynchronous build path;
+  execution uses a preloaded, digest-verified image with `--network=none` and
+  never pulls or installs packages.
+- A tenant sandbox uses one compatible executable runtime profile at a time;
+  publication rejects a release whose image would make the mounted Skill set
+  ambiguous.
+- Suspending a release is reversible by an Owner/Admin. Executable releases
+  whose artifact is missing must be rebuilt before the Resume action becomes
+  available.

@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { statSync, type Stats } from "fs";
 import { homedir } from "os";
-import { isAbsolute, resolve } from "path";
+import { basename, isAbsolute, resolve } from "path";
 import { allowFileRoot, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { resolveProject } from "@/lib/worktree";
 import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
+import { getTenantStore } from "@/lib/tenant-store";
 import { canAccessWorkspacePath, tenantManagedWorkspaceRoot, workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
 
 function normalizeCwd(cwd: string): string {
@@ -49,7 +50,12 @@ export async function POST(req: Request) {
     }
 
     allowFileRoot(normalizedCwd);
-    const projectRoot = canManageHostConfiguration(session)
+    getTenantStore().ensureWorkspace(
+      { tenantId: session.tenant.id, membershipId: session.membership.id },
+      { name: basename(normalizedCwd) || "Workspace", rootPath: normalizedCwd },
+    );
+    const hostAccess = canManageHostConfiguration(session);
+    const projectRoot = hostAccess
       ? (await resolveProject(normalizedCwd)).projectRoot
       : tenantManagedWorkspaceRoot(session);
     return NextResponse.json({

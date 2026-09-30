@@ -77,9 +77,9 @@ export async function POST(req: Request) {
     const tempKey = `__new__${randomUUID()}`;
     const { session, realSessionId } = await startRpcSession(tempKey, "", physicalCwd, {
       ...(hostAccess ? (toolNames ? { toolNames } : {}) : { toolNames: toolNames ?? [] }),
-      tenantIsolated: !hostAccess,
+      tenantIsolated: true,
       tenantSkillPaths: publishedTenantSkillPaths(auth),
-      ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+      tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
       ...(provider && modelId ? { initialModel: { provider, modelId } } : {}),
       ...(explicitThinkingLevel ? { thinkingLevel: explicitThinkingLevel } : {}),
     });

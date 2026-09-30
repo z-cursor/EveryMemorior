@@ -1,36 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stat } from "fs/promises";
 import {
-  getBrowseStartDirectory,
   getParentDirectory,
   listDirectories,
-  listWindowsDrives,
   resolveDirectory,
-  shouldShowWindowsDrivePicker,
 } from "@/lib/directory-browser";
-import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
+import { requireTenantSession } from "@/lib/tenant-auth";
 import { canAccessWorkspacePath, tenantManagedWorkspaceRoot, workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
+import { tenantWorkspaceRootsForRequest } from "@/lib/tenant-agent-runtime";
 import { isFilePathAllowed } from "@/lib/file-access";
 
 // GET /api/cwd/browse?path=...：列出文件系统中的可读子目录。
 export async function GET(request: NextRequest) {
   try {
     const session = requireTenantSession(request);
-    const hostAccess = canManageHostConfiguration(session);
     const requested = request.nextUrl.searchParams.get("path")?.trim();
-
-    if (hostAccess && shouldShowWindowsDrivePicker(requested)) {
-      return NextResponse.json({
-        path: "",
-        parentPath: null,
-        drives: await listWindowsDrives(),
-        directories: [],
-      });
-    }
-
-    const candidate = hostAccess ? getBrowseStartDirectory(requested)
-      : workspacePathFromClient(session, requested || "/workspace");
-    if (!candidate || (!hostAccess && !isFilePathAllowed(candidate, new Set([tenantManagedWorkspaceRoot(session)])))) {
+    const candidate = workspacePathFromClient(session, requested || "/workspace");
+    if (!candidate || !isFilePathAllowed(candidate, new Set(tenantWorkspaceRootsForRequest(request)))) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
     }
 
@@ -50,15 +36,14 @@ export async function GET(request: NextRequest) {
     }
 
     const listed = await listDirectories(resolved);
-    const directories = hostAccess ? listed : listed.flatMap((entry) => {
+    const directories = listed.flatMap((entry) => {
       const publicPath = workspacePathToClient(session, entry.path);
       return publicPath ? [{ name: entry.name, path: publicPath }] : [];
     });
 
     return NextResponse.json({
       path: workspacePathToClient(session, resolved),
-      parentPath: hostAccess ? getParentDirectory(resolved)
-        : resolved === tenantManagedWorkspaceRoot(session) ? null : workspacePathToClient(session, getParentDirectory(resolved)!),
+      parentPath: resolved === tenantManagedWorkspaceRoot(session) ? null : workspacePathToClient(session, getParentDirectory(resolved)!),
       directories,
     });
   } catch (error) {

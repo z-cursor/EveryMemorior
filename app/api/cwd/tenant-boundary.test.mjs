@@ -36,7 +36,7 @@ const { GET: searchSessions } = await jiti.import("../sessions/search/route.ts")
 const { GET: listSessions } = await jiti.import("../sessions/route.ts");
 const { GET: getSessionDetail } = await jiti.import("../sessions/[id]/route.ts");
 const { GET: getFiles, POST: uploadFiles } = await jiti.import("../files/[...path]/route.ts");
-const { workspacePathFromClient, workspacePathToClient } = await jiti.import("../../../lib/tenant-workspace.ts");
+const { canAccessWorkspacePath, tenantManagedWorkspaceRoot, workspacePathFromClient, workspacePathToClient } = await jiti.import("../../../lib/tenant-workspace.ts");
 const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { invalidateSessionListCache } = await jiti.import("../../../lib/session-reader.ts");
 const owner = await setupTenantOwner({
@@ -65,6 +65,11 @@ after(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("the installation owner cannot adopt another membership root before its workspace row exists", () => {
+  const memberRoot = tenantManagedWorkspaceRoot(invited.session);
+  assert.equal(canAccessWorkspacePath(owner.session, memberRoot), false);
+});
+
 test("invited members cannot validate an arbitrary host directory", async () => {
   const response = await validateCwd(new Request("http://localhost/api/cwd/validate", {
     method: "POST", headers: { ...headers, "Content-Type": "application/json" },
@@ -85,6 +90,12 @@ test("members can rename only their virtual project and see its path", async () 
   const listed = await listProjects(new Request("http://localhost/api/projects", { headers: { ...headers, Host: "localhost" } }));
   assert.equal(listed.status, 200);
   assert.ok((await listed.json()).projects.some((project) => project.root === "/workspace" && project.name === "Private notes"));
+
+  const ownerListed = await listProjects(new Request("http://localhost/api/projects", {
+    headers: { Cookie: `${TENANT_SESSION_COOKIE}=${owner.token}`, Host: "localhost" },
+  }));
+  assert.equal(ownerListed.status, 200);
+  assert.equal((await ownerListed.json()).projects.some((project) => project.root === "/workspace"), false);
 });
 
 test("invited members cannot browse the host directory tree", async () => {
@@ -261,6 +272,65 @@ test("tenant session responses expose virtual cwd but not JSONL host paths", asy
   const searchResult = (await search.json()).results.find((item) => item.session.id === sessionId);
   assert.equal(searchResult.session.cwd, "/workspace");
   assert.equal(searchResult.session.path, "");
+});
+
+test("the installation owner cannot list a member's bound session", async () => {
+  const sessionId = "member-private-session";
+  const physicalRoot = workspacePathFromClient(invited.session, "/workspace");
+  const sessionDirectory = join(root, "agent", "sessions", "member-private");
+  mkdirSync(sessionDirectory, { recursive: true });
+  writeFileSync(join(sessionDirectory, `2026-09-21T00-00-00-000Z_${sessionId}.jsonl`), [
+    JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: "2026-09-21T00:00:00.000Z", cwd: physicalRoot }),
+    JSON.stringify({ type: "message", id: "member01", parentId: null, timestamp: "2026-09-21T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "member-only" }] } }),
+  ].join("\n") + "\n");
+  const context = { tenantId: invited.session.tenant.id, membershipId: invited.session.membership.id };
+  const workspace = getTenantStore().ensureWorkspace(context, { name: "Member private", rootPath: physicalRoot });
+  getTenantStore().bindAgentSession(context, workspace.id, sessionId);
+  invalidateSessionListCache();
+
+  const ownerHeaders = { Cookie: `${TENANT_SESSION_COOKIE}=${owner.token}` };
+  const response = await listSessions(new Request("http://localhost/api/sessions?force=1", { headers: ownerHeaders }));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).sessions.some((item) => item.id === sessionId), false);
+});
+
+test("archived session bindings stay hidden and cannot be adopted again", async () => {
+  const sessionId = "archived-owner-session";
+  const archivedRoot = join(root, "archived-project");
+  mkdirSync(archivedRoot, { recursive: true });
+  const sessionDirectory = join(root, "agent", "sessions", "archived-project");
+  mkdirSync(sessionDirectory, { recursive: true });
+  writeFileSync(join(sessionDirectory, `2026-09-22T00-00-00-000Z_${sessionId}.jsonl`), [
+    JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: "2026-09-22T00:00:00.000Z", cwd: archivedRoot }),
+    JSON.stringify({ type: "message", id: "archived01", parentId: null, timestamp: "2026-09-22T00:00:01.000Z", message: { role: "user", content: [{ type: "text", text: "archived-private" }] } }),
+  ].join("\n") + "\n");
+  const context = { tenantId: owner.session.tenant.id, membershipId: owner.session.membership.id };
+  const store = getTenantStore();
+  const workspace = store.ensureWorkspace(context, { name: "Archived", rootPath: archivedRoot });
+  store.bindAgentSession(context, workspace.id, sessionId);
+  store.archiveWorkspaceByRoot(context, archivedRoot);
+  invalidateSessionListCache();
+
+  const listed = await listSessions(new Request("http://localhost/api/sessions?force=1", {
+    headers: { Cookie: `${TENANT_SESSION_COOKIE}=${owner.token}` },
+  }));
+  assert.equal(listed.status, 200);
+  assert.equal((await listed.json()).sessions.some((item) => item.id === sessionId), false);
+  assert.equal(store.listArchivedWorkspaces(owner.session.tenant.id).some((item) => item.rootPath === archivedRoot), true);
+
+  const detail = await getSessionDetail(new Request(`http://localhost/api/sessions/${sessionId}`, {
+    headers: { Cookie: `${TENANT_SESSION_COOKIE}=${owner.token}` },
+  }), { params: Promise.resolve({ id: sessionId }) });
+  assert.equal(detail.status, 403);
+});
+
+test("an account cannot read another account's workspace files", async () => {
+  const memberRoot = workspacePathFromClient(invited.session, "/workspace");
+  const ownerHeaders = { Cookie: `${TENANT_SESSION_COOKIE}=${owner.token}` };
+  const response = await getFiles(new NextRequest(`http://localhost/api/files/${encodeURIComponent(memberRoot)}?type=list`, {
+    headers: ownerHeaders,
+  }), { params: Promise.resolve({ path: [memberRoot] }) });
+  assert.equal(response.status, 403);
 });
 
 test("the same virtual path resolves to separate organization storage", async () => {

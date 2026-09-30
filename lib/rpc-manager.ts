@@ -52,7 +52,10 @@ import {
 } from "./session-tool-selection";
 import { closeAgentSandbox } from "./tenant-agent-runtime";
 import { acquireModelAdmission } from "./model-admission";
-import { BIOGRAPHY_BOOK_ASSEMBLER_TOOL, createBiographyBookAssemblerExtension } from "./biography-book-assembler";
+import { BIOGRAPHY_WORKFLOW_TOOL_NAMES, createBiographyWorkflowAdapterExtension, resolveBiographyBridgePath } from "./biography-workflow-adapter";
+import { expandTenantSkillPaths } from "./tenant-skills";
+import { tenantCompactionSettings } from "./tenant-runtime-settings";
+import { isPathWithinRoots } from "./path-security";
 
 // ============================================================================
 // Types
@@ -122,6 +125,9 @@ type AgentSessionWrapperOptions = {
   tenantIsolated?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
+  tenantSkillPaths?: readonly string[];
+  /** Runtime contract used to invalidate wrappers kept across Next hot reloads. */
+  tenantRuntimeVersion?: string;
 };
 
 const IDLE_RESET_EVENT_TYPES = new Set([
@@ -132,6 +138,10 @@ const IDLE_RESET_EVENT_TYPES = new Set([
 ]);
 
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+// Bump when the server-owned tenant resource contract changes. Wrappers live
+// on globalThis across Next hot reloads, so a Skill path match alone must not
+// keep an instance created before a new adapter was registered.
+const TENANT_RUNTIME_VERSION = "tenant-runtime-v2";
 
 /**
  * Resolves the PI_WEB_IDLE_TIMEOUT_MS environment variable into a session idle
@@ -155,6 +165,9 @@ export function resolveSessionIdleTimeoutMs(
 const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
 
 const SESSION_REPLACEMENT_COMMAND_TYPES = new Set(["fork", "clone"]);
+const TENANT_SKILL_MUTATING_COMMAND_TYPES = new Set([
+  "prompt", "steer", "follow_up", "bash", "set_tools", "set_model", "set_thinking_level", "compact", "reload",
+]);
 const COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT = new Set([
   "get_state",
   "get_session_stats",
@@ -176,6 +189,19 @@ export interface RpcSessionStartOptions {
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
+}
+
+export class TenantSkillSnapshotError extends Error {
+  readonly status = 409;
+  constructor() {
+    super("Tenant Skills changed; refresh the session before sending another command");
+    this.name = "TenantSkillSnapshotError";
+  }
+}
+
+function skillPathSnapshot(paths: readonly string[] | undefined): string | undefined {
+  if (!paths) return undefined;
+  return [...new Set(paths)].sort().join("\u0000");
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -254,6 +280,9 @@ export class AgentSessionWrapper {
   private exactContextMessages: PiAgentMessage[] | undefined;
   private readonly chatOnly: boolean;
   private readonly tenantIsolated: boolean;
+  private readonly tenantSkillSnapshot?: string;
+  private readonly tenantRuntimeVersion?: string;
+  private tenantSkillsStale = false;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly suppressCompletionNotifications: boolean;
   private unsubscribe: (() => void) | null = null;
@@ -271,6 +300,8 @@ export class AgentSessionWrapper {
     this.exactSystemPrompt = options.exactSystemPrompt;
     this.chatOnly = options.chatOnly ?? false;
     this.tenantIsolated = options.tenantIsolated ?? false;
+    this.tenantSkillSnapshot = skillPathSnapshot(options.tenantSkillPaths);
+    this.tenantRuntimeVersion = options.tenantRuntimeVersion;
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.installExactSystemPromptContinuation();
@@ -313,6 +344,21 @@ export class AgentSessionWrapper {
     return this.tenantIsolated;
   }
 
+  hasTenantSkillPaths(paths: readonly string[] | undefined): boolean {
+    return !this.tenantSkillsStale && this.tenantSkillSnapshot === skillPathSnapshot(paths);
+  }
+
+  /** Whether this wrapper was created with the current tenant resource contract. */
+  hasTenantRuntimeVersion(version: string): boolean {
+    return this.tenantRuntimeVersion === version;
+  }
+
+  markTenantSkillsStale(): void {
+    if (this.tenantSkillSnapshot === undefined || this.tenantSkillsStale) return;
+    this.tenantSkillsStale = true;
+    if (!this.isRunning()) void this.shutdown();
+  }
+
   hasSuppressedCompletionNotifications(): boolean {
     return this.suppressCompletionNotifications;
   }
@@ -333,7 +379,10 @@ export class AgentSessionWrapper {
       }
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event);
-      if (event.type === "agent_settled") this.notifyAgentRunCompleteIfIdle();
+      if (event.type === "agent_settled") {
+        this.notifyAgentRunCompleteIfIdle();
+        if (this.tenantSkillsStale && !this.isRunning()) void this.shutdown();
+      }
     });
     this.resetIdleTimer();
   }
@@ -601,6 +650,9 @@ export class AgentSessionWrapper {
 
   async send(command: Record<string, unknown>): Promise<unknown> {
     const type = command.type as string;
+    if (this.tenantSkillsStale && TENANT_SKILL_MUTATING_COMMAND_TYPES.has(type)) {
+      throw new TenantSkillSnapshotError();
+    }
     const allowedDuringReplacement = COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT.has(type);
     if (this.sessionReplacement && !allowedDuringReplacement) {
       throw new Error("Session is being copied to a new session");
@@ -1820,6 +1872,30 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
+export function getRpcSessions(): AgentSessionWrapper[] {
+  return [...getRegistry().values()];
+}
+
+/** Reuse an in-memory session only while its immutable Skill release set matches. */
+export async function ensureRpcSessionTenantSkills(
+  session: AgentSessionWrapper | undefined,
+  tenantSkillPaths: readonly string[] | undefined,
+): Promise<AgentSessionWrapper | undefined> {
+  if (!session?.isAlive() || tenantSkillPaths === undefined) return session;
+  // A Next dev hot reload can leave a wrapper created by the previous module
+  // instance in globalThis. Treat wrappers without the snapshot method as
+  // stale and rebuild them instead of assuming the old resource loader is safe.
+  if (
+    typeof session.hasTenantSkillPaths === "function"
+    && session.hasTenantSkillPaths(tenantSkillPaths)
+    && typeof session.hasTenantRuntimeVersion === "function"
+    && session.hasTenantRuntimeVersion(TENANT_RUNTIME_VERSION)
+  ) return session;
+  if (session.isRunning()) throw new TenantSkillSnapshotError();
+  await session.shutdown();
+  return undefined;
+}
+
 export interface SetRpcSessionToolsResult {
   session: AgentSessionWrapper;
   sessionId: string;
@@ -1834,7 +1910,7 @@ export async function setRpcSessionTools(
   startOptions: RpcSessionStartOptions = {},
 ): Promise<SetRpcSessionToolsResult> {
   const toolNames = validateSessionToolSelection(requestedToolNames);
-  const existing = getRpcSession(sessionId);
+  const existing = await ensureRpcSessionTenantSkills(getRpcSession(sessionId), startOptions.tenantSkillPaths);
 
   if (!existing?.isAlive()) {
     if (!sessionFile) throw new Error("Session not found");
@@ -2036,8 +2112,20 @@ export async function startRpcSession(
   const registry = getRegistry();
   const locks = getLocks();
 
-  const existing = registry.get(sessionId);
-  if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
+  let existing = registry.get(sessionId);
+  if (existing?.isAlive()) {
+    const hasCurrentSkills = typeof existing.hasTenantSkillPaths === "function"
+      && existing.hasTenantSkillPaths(options.tenantSkillPaths);
+    const hasCurrentRuntime = typeof existing.hasTenantRuntimeVersion === "function"
+      && existing.hasTenantRuntimeVersion(TENANT_RUNTIME_VERSION);
+    if (options.tenantSkillPaths !== undefined && (!hasCurrentSkills || !hasCurrentRuntime)) {
+      if (existing.isRunning()) throw new TenantSkillSnapshotError();
+      await existing.shutdown();
+      existing = undefined;
+    } else {
+      return { session: existing, realSessionId: sessionId };
+    }
+  }
 
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
@@ -2051,7 +2139,14 @@ export async function startRpcSession(
       ? { id: options.initialSessionId }
       : undefined);
   }
-  const sessionCwd = sessionManager.getCwd();
+    const sessionCwd = sessionManager.getCwd();
+    // Biography bridge paths must be resolved against the directory that is
+    // actually mounted as /workspace for this Agent session. The tenant
+    // managed root is an ownership boundary, but it is not necessarily the
+    // session's workspace (owners can use an existing workspace such as
+    // ~/pi-cwd-*). Passing the managed root here made valid source_path values
+    // fail before the bridge could register the chapter source.
+    const biographyWorkspaceRoot = sessionCwd;
   const subagentResources = sessionFile
     ? readSubagentSessionResources(
         sessionManager.getEntries() as unknown as SessionEntry[],
@@ -2061,6 +2156,8 @@ export async function startRpcSession(
     ? undefined
     : readSessionToolSelection(sessionManager.getEntries() as unknown as SessionEntry[]);
   const selectedToolNames = subagentResources?.tools ?? persistedToolNames ?? requestedToolNames;
+  const biographyBridgeAvailable = Boolean(options.tenantSkillPaths?.length
+    && resolveBiographyBridgePath(options.tenantSkillPaths));
   if (!subagentResources && persistedToolNames === undefined && requestedToolNames !== undefined) {
     appendSessionToolSelection(sessionManager, requestedToolNames);
   }
@@ -2086,8 +2183,8 @@ export async function startRpcSession(
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
       toolsOption = selectedToolNames.length === 0
-        ? options.tenantIsolated && options.tenantWorkspaceRoot
-          ? [BIOGRAPHY_BOOK_ASSEMBLER_TOOL]
+        ? options.tenantIsolated && options.tenantWorkspaceRoot && biographyBridgeAvailable
+          ? [...BIOGRAPHY_WORKFLOW_TOOL_NAMES]
           : []
         : undefined;
     }
@@ -2104,6 +2201,10 @@ export async function startRpcSession(
         ? undefined
         : projectTrustReloadOptions(sessionCwd, agentDir);
     const settingsManager = SettingsManager.create(sessionCwd, agentDir);
+    const tenantSkillResourcePaths = options.tenantSkillPaths
+      ? expandTenantSkillPaths(options.tenantSkillPaths)
+      : [];
+    const tenantSkillResourceRoots = new Set(tenantSkillResourcePaths);
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2128,18 +2229,18 @@ export async function startRpcSession(
               ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
               noContextFiles: true,
               noSkills: false,
-              additionalSkillPaths: options.tenantSkillPaths ?? [],
-              ...(options.tenantWorkspaceRoot
+              additionalSkillPaths: tenantSkillResourcePaths,
+              ...(options.tenantWorkspaceRoot && biographyBridgeAvailable
                 ? {
-                    extensionFactories: [createBiographyBookAssemblerExtension({
-                      workspaceRoot: options.tenantWorkspaceRoot,
-                      skillPaths: options.tenantSkillPaths,
+                    extensionFactories: [createBiographyWorkflowAdapterExtension({
+                      skillPaths: options.tenantSkillPaths ?? [],
+                      workspaceRoot: biographyWorkspaceRoot,
                     })],
                   }
                 : {}),
               skillsOverride: (base) => ({
                 skills: base.skills.filter((skill) =>
-                  options.tenantSkillPaths?.some((path) => skill.filePath.startsWith(path))
+                  isPathWithinRoots(skill.filePath, tenantSkillResourceRoots)
                   || ["tavily-search", "ponytail"].includes(skill.name.toLowerCase().split(":").at(-1) ?? ""),
                 ),
                 diagnostics: base.diagnostics,
@@ -2150,11 +2251,11 @@ export async function startRpcSession(
               ? {
                   ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS,
                   noSkills: false,
-                  additionalSkillPaths: options.tenantSkillPaths,
+                  additionalSkillPaths: tenantSkillResourcePaths,
                 }
               : CHAT_ONLY_RESOURCE_LOADER_OPTIONS
         : {
-            additionalSkillPaths: options.tenantSkillPaths ?? [],
+            additionalSkillPaths: tenantSkillResourcePaths,
             extensionFactories: [
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
@@ -2165,6 +2266,17 @@ export async function startRpcSession(
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
               ),
+              // The uploaded package's extension files are never loaded here.
+              // This adapter is server-owned and forwards only the fixed
+              // biography bridge argv into AgentSandbox. Include it for the
+              // installation owner as well as isolated tenant sessions when
+              // the route supplies the managed workspace root.
+              ...(options.tenantWorkspaceRoot && biographyBridgeAvailable
+                ? [createBiographyWorkflowAdapterExtension({
+                    skillPaths: options.tenantSkillPaths ?? [],
+                    workspaceRoot: biographyWorkspaceRoot,
+                  })]
+                : []),
             ],
             extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
           },
@@ -2200,6 +2312,10 @@ export async function startRpcSession(
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
       : initial?.model;
+    if (options.tenantIsolated) {
+      const compaction = tenantCompactionSettings(startupModel?.contextWindow);
+      if (compaction) settingsManager.applyOverrides({ compaction });
+    }
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
@@ -2208,7 +2324,7 @@ export async function startRpcSession(
       ...(scope.scopedModels.length > 0 ? { scopedModels: [...scope.scopedModels] } : {}),
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
       ...(options.tenantIsolated && options.tenantWorkspaceRoot && selectedToolNames?.length
-        ? { customTools: createTenantReadTools(options.tenantWorkspaceRoot) }
+        ? { customTools: createTenantReadTools(biographyWorkspaceRoot) }
         : {}),
       ...(subagentResources ? { excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES] } : {}),
     });
@@ -2249,6 +2365,8 @@ export async function startRpcSession(
       exactSystemPrompt,
       chatOnly,
       tenantIsolated: options.tenantIsolated,
+      tenantSkillPaths: options.tenantSkillPaths,
+      tenantRuntimeVersion: TENANT_RUNTIME_VERSION,
       onAgentRunComplete: (completedSessionId) => {
         void notifySessionComplete(completedSessionId).catch((error) => {
           console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error);

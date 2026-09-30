@@ -17,7 +17,16 @@ type TenantSkillView = {
   description: string;
   status: "draft" | "pending_review" | "published" | "suspended" | "archived";
   version: number;
+  imageDigest?: string | null;
+  lockfileDigest?: string | null;
+  runtimeProfile?: string | null;
+  buildStatus?: "pending" | "building" | "ready" | "failed";
+  buildError?: string | null;
 };
+
+function digestPreview(value: string | null | undefined): string {
+  return value ? `${value.slice(0, 19)}…` : "—";
+}
 
 async function jsonRequest<T = Record<string, unknown>>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -77,7 +86,7 @@ export function TenantSettings({ onOpenQuality, sessionId, onSessionReloaded }: 
   }, [data?.canManage]);
 
   useEffect(() => {
-    if (data && !data.canManage && !skillsLoaded && !skillsError) void loadSkills();
+    if (data && !skillsLoaded && !skillsError) void loadSkills();
   }, [data, skillsLoaded, skillsError, loadSkills]);
 
   const copyInvitation = async () => {
@@ -188,21 +197,31 @@ export function TenantSettings({ onOpenQuality, sessionId, onSessionReloaded }: 
       const result = await jsonRequest<{ skill?: TenantSkillView }>("/api/tenant/skills", { method: "POST", body: form });
       setSkillFile(null);
       if (skillFileInputRef.current) skillFileInputRef.current.value = "";
-      setNotice(result.skill?.status === "published" ? "声明式 Skill 已启用，可在当前或新会话中调用。" : "Skill 草稿已上传，请提交审核。");
+      setNotice(result.skill?.status === "published" ? "声明式 Skill 已启用，可在当前或新会话中调用。" : result.skill?.status === "suspended" ? "Skill 已存在但目前停用，请点击恢复。" : "Skill 草稿已上传，请提交审核。");
       await loadSkills();
       await reloadSkillResources();
     });
   };
 
-  const changeSkillStatus = (skillId: string, action: "submit" | "publish" | "suspend") => run(async () => {
+  const changeSkillStatus = (skillId: string, action: "submit" | "publish" | "suspend" | "resume" | "build" | "retry") => run(async () => {
     await jsonRequest("/api/tenant/skills", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ skillId, action }),
     });
-    setNotice(action === "publish" ? "Skill 已发布。" : action === "suspend" ? "Skill 已停用。" : "Skill 已提交审核。");
+    setNotice(action === "publish" ? "Skill 已发布。" : action === "suspend" ? "Skill 已停用。" : action === "resume" ? "Skill 已恢复。" : action === "build" || action === "retry" ? "运行时构建已开始。" : "Skill 已提交审核。");
     await loadSkills();
     await reloadSkillResources();
   });
+
+  const deleteSkill = (skill: TenantSkillView) => {
+    if (!window.confirm(`删除 Skill「${skill.name}」？删除后将无法在当前租户中使用。`)) return;
+    void run(async () => {
+      await jsonRequest(`/api/tenant/skills?skillId=${encodeURIComponent(skill.id)}`, { method: "DELETE" });
+      setNotice("Skill 已删除。");
+      await loadSkills();
+      await reloadSkillResources();
+    });
+  };
 
   if (!data) return (
     <div className="admin-settings"><div className="admin-content">
@@ -247,10 +266,15 @@ export function TenantSettings({ onOpenQuality, sessionId, onSessionReloaded }: 
               <div className="admin-skill-list">
                 {skills.length === 0 && <p className="admin-help">还没有上传个人 Skill。</p>}
                 {skills.map((skill) => <div key={skill.id} className="admin-row">
-                  <div><strong>{skill.name} · v{skill.version}</strong><p className="admin-help">{skill.status}</p></div>
+                  <div><strong>{skill.name} · v{skill.version}</strong><p className="admin-help">{skill.status}{skill.buildStatus ? ` · 运行时 ${skill.buildStatus}` : ""}{skill.runtimeProfile ? ` · ${skill.runtimeProfile}` : ""}</p>{(skill.imageDigest || skill.lockfileDigest) && <p className="admin-help">image {digestPreview(skill.imageDigest)} · lock {digestPreview(skill.lockfileDigest)}</p>}{skill.buildError && <p className="admin-help">{skill.buildError}</p>}</div>
                   <div className="admin-actions">
                     {skill.status === "draft" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, "submit")}>提交审核</ConfigButton>}
                     {skill.status === "published" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, "suspend")}>停用</ConfigButton>}
+                    {skill.status === "suspended" && <>
+                      {data.canManage && skill.buildStatus !== "ready" && skill.buildStatus !== "building" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, skill.buildStatus === "failed" ? "retry" : "build")}>构建运行时</ConfigButton>}
+                      {data.canManage && <ConfigButton disabled={busy || (skill.buildStatus !== undefined && skill.buildStatus !== "ready")} title={skill.buildStatus !== "ready" ? "运行时构建完成后才能恢复" : undefined} onClick={() => void changeSkillStatus(skill.id, "resume")}>恢复</ConfigButton>}
+                    </>}
+                    <ConfigButton variant="ghost" disabled={busy} onClick={() => deleteSkill(skill)}>删除</ConfigButton>
                   </div>
                 </div>)}
               </div>
@@ -357,7 +381,7 @@ export function TenantSettings({ onOpenQuality, sessionId, onSessionReloaded }: 
           </div>
         </details>
 
-        <details className="admin-details" onToggle={(event) => { if (event.currentTarget.open) void refreshSkills(); }}>
+        <details open className="admin-details" onToggle={(event) => { if (event.currentTarget.open) void refreshSkills(); }}>
           <summary>成员技能 · 高级设置</summary>
           <div className="admin-details-body">
             <p className="admin-help">声明式 Skill 上传后仅对你启用；含脚本的版本需提交审核，脚本只在 Docker 沙盒内执行。这里不是凡小忆的行为配置。</p>
@@ -381,11 +405,17 @@ export function TenantSettings({ onOpenQuality, sessionId, onSessionReloaded }: 
             </form>
             {skillsLoaded && skills.length === 0 && <p className="admin-help">暂无租户 Skill。</p>}
             {skills.map((skill) => <div key={skill.id} className="admin-row">
-              <div><strong>{skill.name} · v{skill.version}</strong><p className="admin-help">{skill.status}</p></div>
+              <div><strong>{skill.name} · v{skill.version}</strong><p className="admin-help">{skill.status}{skill.buildStatus ? ` · 运行时 ${skill.buildStatus}` : ""}{skill.runtimeProfile ? ` · ${skill.runtimeProfile}` : ""}</p>{(skill.imageDigest || skill.lockfileDigest) && <p className="admin-help">image {digestPreview(skill.imageDigest)} · lock {digestPreview(skill.lockfileDigest)}</p>}{skill.buildError && <p className="admin-help">{skill.buildError}</p>}</div>
               <div className="admin-actions">
                 {skill.status === "draft" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, "submit")}>提交审核</ConfigButton>}
-                {data.canManage && skill.status === "pending_review" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, "publish")}>发布</ConfigButton>}
+                {data.canManage && skill.status === "pending_review" && skill.buildStatus !== "ready" && skill.buildStatus !== "building" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, skill.buildStatus === "failed" ? "retry" : "build")}>构建运行时</ConfigButton>}
+                {data.canManage && skill.status === "pending_review" && <ConfigButton disabled={busy || (skill.buildStatus !== undefined && skill.buildStatus !== "ready")} title={skill.buildStatus === "failed" ? (skill.buildError ?? "运行时构建失败") : skill.buildStatus !== "ready" ? "运行时构建完成后才能发布" : undefined} onClick={() => void changeSkillStatus(skill.id, "publish")}>发布</ConfigButton>}
                 {data.canManage && skill.status === "published" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, "suspend")}>停用</ConfigButton>}
+                {data.canManage && skill.status === "suspended" && <>
+                  {skill.buildStatus !== "ready" && skill.buildStatus !== "building" && <ConfigButton disabled={busy} onClick={() => void changeSkillStatus(skill.id, skill.buildStatus === "failed" ? "retry" : "build")}>构建运行时</ConfigButton>}
+                  <ConfigButton disabled={busy || (skill.buildStatus !== undefined && skill.buildStatus !== "ready")} title={skill.buildStatus !== "ready" ? "运行时构建完成后才能恢复" : undefined} onClick={() => void changeSkillStatus(skill.id, "resume")}>恢复</ConfigButton>
+                </>}
+                <ConfigButton variant="ghost" disabled={busy} onClick={() => deleteSkill(skill)}>删除</ConfigButton>
               </div>
             </div>)}
           </div>

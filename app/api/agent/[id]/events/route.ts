@@ -1,6 +1,6 @@
 import { createAgentEventStream } from "@/lib/agent-event-stream";
 import { resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, isPersistedTenantSession, startRpcSession } from "@/lib/rpc-manager";
+import { ensureRpcSessionTenantSkills, getRpcSession, isPersistedTenantSession, startRpcSession, TenantSkillSnapshotError } from "@/lib/rpc-manager";
 import { authorizeAgentSessionFileRequest, authorizeAgentSessionRequest } from "@/lib/tenant-agent-runtime";
 import { canManageHostConfiguration, requireTenantSession, TenantAuthenticationError } from "@/lib/tenant-auth";
 import { publishedTenantSkillPaths } from "@/lib/tenant-skills";
@@ -20,12 +20,17 @@ export async function GET(
   try {
     const auth = requireTenantSession(req);
     const hostAccess = canManageHostConfiguration(auth);
+    const tenantSkillPaths = publishedTenantSkillPaths(auth);
     // Fast path: already-running session
     let session = getRpcSession(id);
     let sessionPromise;
     if (session?.isAlive()) {
       authorizeAgentSessionRequest(req, id, session.cwd);
-      if (!hostAccess && !session.isChatOnly() && !session.isTenantIsolated()) {
+      session = await ensureRpcSessionTenantSkills(session, tenantSkillPaths);
+      if (!session) sessionPromise = undefined;
+    }
+    if (session?.isAlive()) {
+      if (!session.isTenantIsolated()) {
         // Dev hot reload can leave an idle wrapper created before tenant
         // isolation was enabled. Reopen it with the current policy; never
         // replace a wrapper while it is running.
@@ -51,11 +56,11 @@ export async function GET(
         sessionPromise = startRpcSession(id, "", binding.workspacePath, {
           initialSessionId: id,
           toolNames: hostAccess ? undefined : [],
-          tenantIsolated: !hostAccess,
-          tenantSkillPaths: publishedTenantSkillPaths(auth),
-          ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+          tenantIsolated: true,
+          tenantSkillPaths,
+          tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
         }).then((result) => {
-          if (!hostAccess && !result.session.isChatOnly() && !result.session.isTenantIsolated()) {
+          if (!result.session.isTenantIsolated()) {
             throw new TenantAuthenticationError("Agent session is not tenant-isolated", 403);
           }
           return result.session;
@@ -67,12 +72,12 @@ export async function GET(
         }
         if (req.signal.aborted) return new Response(null, { status: 204 });
         sessionPromise = startRpcSession(id, filePath, undefined, {
-          tenantIsolated: !hostAccess,
-          tenantSkillPaths: publishedTenantSkillPaths(auth),
-          ...(!hostAccess ? { tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth) } : {}),
+          tenantIsolated: true,
+          tenantSkillPaths,
+          tenantWorkspaceRoot: tenantManagedWorkspaceRoot(auth),
         })
           .then((result) => {
-            if (!hostAccess && !result.session.isChatOnly() && !result.session.isTenantIsolated()) {
+            if (!result.session.isTenantIsolated()) {
               throw new TenantAuthenticationError("Agent session is not tenant-isolated", 403);
             }
             return result.session;
@@ -91,7 +96,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    const status = error instanceof TenantAuthenticationError ? error.status : 500;
+    const status = error instanceof TenantAuthenticationError || error instanceof TenantSkillSnapshotError ? error.status : 500;
     return new Response(error instanceof Error ? error.message : String(error), { status });
   }
 }
