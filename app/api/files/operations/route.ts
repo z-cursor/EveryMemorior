@@ -4,6 +4,7 @@ import { tenantWorkspaceRootsForRequest } from '@/lib/tenant-agent-runtime';
 import { requireTenantSession, TenantAuthenticationError } from '@/lib/tenant-auth';
 import { workspacePathFromClient, workspacePathToClient } from '@/lib/tenant-workspace';
 import { getTenantStore } from '@/lib/tenant-store';
+import { isWorkspaceMutationPathAllowed } from '@/lib/path-security';
 import { samePath } from '@/lib/paths';
 import { isApiRequestAllowed } from '@/lib/request-security';
 import { executeFileOperations, fileUndoPaths } from '@/lib/file-operations';
@@ -31,13 +32,12 @@ export async function POST(request: NextRequest) {
         const target = body.target ? workspacePathFromClient(session, body.target) : undefined;
         if (paths?.some(p => !p || !isFilePathAllowed(p, new Set([root]))) || (body.target && (!target || !isFilePathAllowed(target, new Set([root])))))
             return NextResponse.json({ error: 'Access denied' }, { status: 403 });
-        const otherRoots = getTenantStore().listActiveWorkspaces(session.tenant.id).map(workspace => workspace.rootPath).filter(p => !samePath(p, root) && isFilePathAllowed(p, new Set([root])));
-        if ([...(paths || []), ...undoPaths, target].some(p => p && otherRoots.some(other => isFilePathAllowed(p, new Set([other])))))
-            return NextResponse.json({ error: 'Access denied' }, { status: 403 });
-        if ([...(paths || []), ...undoPaths].some(source => source && otherRoots.some(other => isFilePathAllowed(other, new Set([source]))))) {
+        const otherRoots = getTenantStore().listActiveWorkspaces(session.tenant.id).map(workspace => workspace.rootPath).filter(p => !samePath(p, root));
+        if ([...(paths || []), ...undoPaths].some(p => p && !isWorkspaceMutationPathAllowed(p, root, otherRoots, true))
+            || (target && !isWorkspaceMutationPathAllowed(target, root, otherRoots))) {
             return NextResponse.json({ error: 'Access denied' }, { status: 403 });
         }
-        const results = executeFileOperations({ ...body, paths: paths as string[] | undefined, target: target || undefined }, root, scope).map(item => ({ ...item, source: workspacePathToClient(session, item.source) || body.cwd, destination: item.destination ? workspacePathToClient(session, item.destination) || undefined : undefined }));
+        const results = executeFileOperations({ ...body, paths: paths as string[] | undefined, target: target || undefined }, root, scope, otherRoots).map(item => ({ ...item, source: workspacePathToClient(session, item.source) || body.cwd, destination: item.destination ? workspacePathToClient(session, item.destination) || undefined : undefined }));
         return NextResponse.json({ results });
     }
     catch (error) {

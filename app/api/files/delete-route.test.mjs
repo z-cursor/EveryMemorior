@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -139,4 +139,20 @@ test("upload cannot introduce protected directories", async () => {
   const response = await targetUpload(target, [".git/config"]);
   assert.equal(response.status, 400);
   assert.equal(existsSync(join(target, ".git")), false);
+});
+
+test("specified-directory upload cannot enter another workspace through an alias", async () => {
+  const nested = join(workspace, 'PrivateUpload'); mkdirSync(nested);
+  writeFileSync(join(nested,'note.txt'),'foreign');
+  getTenantStore().ensureWorkspace({tenantId:auth.session.tenant.id,membershipId:auth.session.membership.id},{name:'PrivateUpload',rootPath:nested});
+  const alias = join(workspace,'UploadAlias'); symlinkSync(nested,alias,'dir');
+  for(const strategy of ['error','rename','overwrite']) {
+    const response = await targetUpload(alias,['note.txt'],strategy);
+    assert.equal(response.status,403);
+    assert.equal(readFileSync(join(nested,'note.txt'),'utf8'),'foreign');
+  }
+  const protectedRoot=join(workspace,'.git');mkdirSync(protectedRoot);
+  const protectedAlias=join(workspace,'ProtectedUploadAlias');symlinkSync(protectedRoot,protectedAlias,'dir');
+  assert.equal((await targetUpload(protectedAlias,['injected.txt'])).status,403);
+  assert.equal(existsSync(join(protectedRoot,'injected.txt')),false);
 });

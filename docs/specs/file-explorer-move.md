@@ -1,10 +1,10 @@
 # 文件区批量操作与指定目录上传
 
-状态：产品需求与测试边界均已由用户确认；规格已发布，可供实现。尚未实施。
+状态：已实现；相关 API、浏览器验收、TypeScript 与 lint 检查通过。
 
 正式 tracker：[GitHub Issue #6](https://github.com/z-cursor/EveryMemorior/issues/6)。
 
-标签状态：ready-for-agent 已通过登录为 z-cursor 的 GitHub CLI 添加并验证。
+实现跟踪：[#7](https://github.com/z-cursor/EveryMemorior/issues/7)、[#8](https://github.com/z-cursor/EveryMemorior/issues/8)、[#9](https://github.com/z-cursor/EveryMemorior/issues/9)、[#10](https://github.com/z-cursor/EveryMemorior/issues/10)，集成分支 `integration/file-explorer-operations`。
 
 ## Problem Statement
 
@@ -168,7 +168,7 @@
 
 现有文件预览页签状态和路径引用测试可补充直接的状态行为回归。仅当真实边界难以稳定触发命名竞争或路径映射边界时，补充最少的纯函数测试；避免新增跨层 mock 或复制实现的测试。
 
-实现阶段按 TDD 逐个行为推进，定期运行相关测试与类型检查，最终运行 lint、TypeScript、完整单元测试及相关浏览器回归。遵循仓库约定，开发期间不运行完整构建。当前规格编写阶段不执行尚不存在的功能测试。
+实现阶段按 TDD 逐个行为推进，定期运行相关测试与类型检查，最终运行 lint、TypeScript、完整单元测试及相关浏览器回归。遵循仓库约定，开发期间不运行完整构建。验证结果见下方实现记录。
 
 ## Out of Scope
 
@@ -186,4 +186,13 @@
 - 本规格由已确认的需求访谈整理，用户通过 Q31 确认产品范围。Q20 将指定目录上传加入原移动需求，Q25 增加批量引用和删除，Q30 明确撤销仅用于移动。
 - 技术接口字段及测试组织由实现时依照上述外部契约确定；本规格不绑定具体文件布局或内部实现。
 - 产品行为与测试边界确认均已完成，用户已同意发布规格。
-- GitHub Issues 是本项目的正式 tracker。本规格已发布并标记 ready-for-agent。后续可拆为有依赖关系的实现 tickets。
+- GitHub Issues 是本项目的正式 tracker。本规格已发布并拆为上述有依赖关系的实现 tickets。
+
+
+## 实现验证记录
+
+- 认证 API 临时文件系统回归覆盖移动、撤销、上传、冲突与部分失败；服务端按实际路径拒绝其他 Workspace、其符号链接别名及受保护目录别名，撤销重新检查当前授权。
+- `npm run test:file-explorer` 覆盖真实文件 API 与浏览器交互，包括搜索中部分成功后保留失败/跳过项、折叠后的已选目录仍禁止自身及后代目标、拖动/上传/取消/撤销和手机按钮流程。
+- `node_modules/.bin/tsc --noEmit` 通过；`npm run lint` 无错误，保留 3 项已有警告。
+- 完整单元测试已与实施前 `127feb10` 基线比较：20 项已有失败保持一致，未纳入本功能修复；相关文件操作回归通过。最终集成复核记录在正式 tracker。
+- 目录移动使用 Node 文件描述符固定递归遍历位置，已在 Linux 描述符文件系统环境验证。服务器不提供可用的 `/proc/self/fd` 或 `/dev/fd` 时，目录移动会安全拒绝，不退回易受路径替换影响的操作。

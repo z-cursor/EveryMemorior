@@ -2,6 +2,7 @@
 import { createContext, useContext } from 'react';
 export interface FileSelectionContextValue {
     selected: Set<string>;
+    registerNode: (path: string, isDirectory: boolean) => void;
     toggle: (path: string, shift: boolean) => void;
 }
 export const FileSelectionContext = createContext<FileSelectionContextValue | null>(null);
