@@ -14,31 +14,83 @@ declare global { var __piFileUndoRecords: Map<string, UndoRecord> | undefined; }
 function records() { return globalThis.__piFileUndoRecords ??= new Map(); }
 function identity(value: string) { const s = fs.lstatSync(value, { bigint: true }); return `${s.dev}:${s.ino}:${s.birthtimeNs}:${s.isDirectory() ? 'dir' : 'file'}`; }
 
+function pinnedDirectory(fd: number): string {
+  const expected = fs.fstatSync(fd, { bigint: true });
+  for (const prefix of ['/proc/self/fd', '/dev/fd']) {
+    const value = `${prefix}/${fd}`;
+    try {
+      const actual = fs.statSync(value, { bigint: true });
+      if (actual.dev !== expected.dev || actual.ino !== expected.ino || !actual.isDirectory()) continue;
+      fs.readdirSync(value); return value;
+    } catch { /* Try another descriptor filesystem; never fall back to mutable paths. */ }
+  }
+  throw new Error('Safe directory moves are unavailable on this server platform');
+}
 /** Snapshot a tree without following symlinks; detect edits before deleting originals. */
 function fingerprint(value: string): string {
   const hash = createHash('sha256');
-  function visit(entry: string) {
+  function visit(entry: string, label: string) {
     const stat = fs.lstatSync(entry, { bigint: true });
-    hash.update(`${entry.slice(value.length)}:${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`);
+    hash.update(`${label}:${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`);
     if (stat.isSymbolicLink()) hash.update(fs.readlinkSync(entry));
-    else if (stat.isDirectory()) for (const name of fs.readdirSync(entry).sort()) visit(path.join(entry, name));
-    else if (stat.isFile()) {
-      const fd = fs.openSync(entry, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-      try { const buffer = Buffer.allocUnsafe(64 * 1024); let count: number; while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count)); }
+    else if (stat.isDirectory()) {
+      const fd = fs.openSync(entry, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      try { const opened = fs.fstatSync(fd, { bigint: true }); if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error('Directory changed during movement'); const pinned = pinnedDirectory(fd); for (const name of fs.readdirSync(pinned).sort()) visit(path.join(pinned, name), `${label}/${name}`); }
       finally { fs.closeSync(fd); }
-    }
-    else throw new Error('Unsupported item inside directory');
+    } else if (stat.isFile()) {
+      const fd = fs.openSync(entry, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try {
+        const opened = fs.fstatSync(fd, { bigint: true }); if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error('File changed during movement');
+        const buffer = Buffer.allocUnsafe(64 * 1024); let count: number; while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count));
+      } finally { fs.closeSync(fd); }
+    } else throw new Error('Unsupported item inside directory');
   }
-  visit(value); return hash.digest('hex');
+  visit(value, ''); return hash.digest('hex');
+}
+function copyFileExclusive(source: string, destination: string) {
+  const stat = fs.lstatSync(source, { bigint: true });
+  const sourceFd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let targetFd: number | undefined;
+  let completed = false;
+  try {
+    const opened = fs.fstatSync(sourceFd, { bigint: true });
+    if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error('Source changed during movement');
+    targetFd = fs.openSync(destination, 'wx', Number(stat.mode));
+    const buffer = Buffer.allocUnsafe(64 * 1024); let count: number;
+    while ((count = fs.readSync(sourceFd, buffer, 0, buffer.length, null)) > 0) {
+      let written = 0; while (written < count) written += fs.writeSync(targetFd, buffer, written, count - written);
+    }
+    const after = fs.fstatSync(sourceFd, { bigint: true });
+    if (after.size !== opened.size || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) throw new Error('Source changed during movement');
+    fs.fchmodSync(targetFd, Number(stat.mode));
+    fs.futimesSync(targetFd, Number(stat.atimeNs) / 1e9, Number(stat.mtimeNs) / 1e9);
+    completed = true;
+  } finally {
+    fs.closeSync(sourceFd);
+    if (targetFd !== undefined) {
+      if (!completed) {
+        const created = fs.fstatSync(targetFd, { bigint: true });
+        try { const current = fs.lstatSync(destination, { bigint: true }); if (current.dev === created.dev && current.ino === created.ino) fs.unlinkSync(destination); } catch { /* A replaced destination is never removed. */ }
+      }
+      fs.closeSync(targetFd);
+    }
+  }
 }
 function copyChildren(source: string, destination: string) {
-  for (const name of fs.readdirSync(source)) {
-    const from = path.join(source, name); const to = path.join(destination, name); const stat = fs.lstatSync(from);
-    if (stat.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(from), to);
-    else if (stat.isDirectory()) { fs.mkdirSync(to, { mode: stat.mode }); copyChildren(from, to); fs.utimesSync(to, stat.atime, stat.mtime); }
-    else if (stat.isFile()) { fs.copyFileSync(from, to, fs.constants.COPYFILE_EXCL); fs.chmodSync(to, stat.mode); fs.utimesSync(to, stat.atime, stat.mtime); }
-    else throw new Error('Unsupported item inside directory');
-  }
+  const sourceFd = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  let targetFd: number | undefined;
+  try {
+    targetFd = fs.openSync(destination, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    const fromRoot = pinnedDirectory(sourceFd);
+    const toRoot = pinnedDirectory(targetFd);
+    for (const name of fs.readdirSync(fromRoot)) {
+      const from = path.join(fromRoot, name); const to = path.join(toRoot, name); const stat = fs.lstatSync(from);
+      if (stat.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(from), to);
+      else if (stat.isDirectory()) { fs.mkdirSync(to, { mode: stat.mode }); copyChildren(from, to); fs.utimesSync(to, stat.atime, stat.mtime); }
+      else if (stat.isFile()) copyFileExclusive(from, to);
+      else throw new Error('Unsupported item inside directory');
+    }
+  } finally { fs.closeSync(sourceFd); if (targetFd !== undefined) fs.closeSync(targetFd); }
 }
 /** Exclusive creation never overwrites a racing destination. Directory movement
  * is copy-then-remove, with verification and cleanup before source removal. */
@@ -51,8 +103,7 @@ function moveExclusive(source: string, destination: string) {
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
       before = fingerprint(source);
-      fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(destination, stat.mode); fs.utimesSync(destination, stat.atime, stat.mtime);
+      copyFileExclusive(source, destination);
     }
     const createdIdentity = identity(destination);
     try {
