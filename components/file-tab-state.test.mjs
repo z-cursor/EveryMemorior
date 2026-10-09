@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { openFileTab, saveFileViewerState } from "./file-tab-state.ts";
+import { createJiti } from "jiti";
+import { resolve } from "node:path";
+
+const { openFileTab, saveFileViewerState } = await createJiti(import.meta.url, {
+  alias: { "@": resolve(import.meta.dirname, "..") },
+}).import("./file-tab-state.ts");
 
 const tabA = {
   id: "file:/repo/a.ts",

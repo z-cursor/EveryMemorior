@@ -2174,3 +2174,23 @@ span.token.table {
   .companion-composer { padding: 12px; margin-bottom: max(8px, env(safe-area-inset-bottom)); }
   .companion-composer-actions { align-items: center; font-size: 12px; }
 }
+
+/* Shared controls for file selection, destination and conflict dialogs. */
+.file-operation-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text);
+  font-size: var(--font-size-control);
+  line-height: var(--line-height-control);
+  cursor: pointer;
+}
+.file-operation-button:hover:not(:disabled) { background: var(--bg-hover); }
+.file-operation-button:disabled { opacity: .45; cursor: not-allowed; }
+.file-operation-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.file-operation-button[data-destructive] { color: var(--status-danger-text); }

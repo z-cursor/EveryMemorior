@@ -5,7 +5,11 @@ export const enLocale: LocalePlugin = {
   id: "en",
   label: "English",
   messages: {
-    "files.selectEntry": "Select {name}",
+    "files.rootDropTarget": "Workspace root",
+    "files.dragMove": "Move {count} selected items",
+    "files.dragUpload": "Upload {count} items",
+    "files.invalidDropTarget": "Cannot drop here",
+  "files.selectEntry": "Select {name}",
     "files.selectVisible": "Select visible",
     "files.clearSelection": "Clear selection",
     "files.selectionCount": "{count} selected",
