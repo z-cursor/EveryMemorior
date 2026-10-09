@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 
-export const UPLOAD_CONFLICT_STRATEGIES = ["error", "overwrite", "skip"] as const;
+export const UPLOAD_CONFLICT_STRATEGIES = ["error", "overwrite", "skip", "rename"] as const;
 export type UploadConflictStrategy = typeof UPLOAD_CONFLICT_STRATEGIES[number];
 
 const UPLOAD_CONFLICT_STRATEGY_SET = new Set<string>(UPLOAD_CONFLICT_STRATEGIES);
@@ -52,7 +52,7 @@ export function inspectUploadTargets(directory: string, fileNames: string[]): Up
   const conflicts: string[] = [];
   const nonReplaceable: string[] = [];
 
-  for (const fileName of fileNames) {
+  for (const fileName of [...new Set(fileNames.map(name => name.split("/")[0]))]) {
     const destination = path.join(directory, ...fileName.split("/"));
     let stat: fs.Stats;
     try {
@@ -64,8 +64,15 @@ export function inspectUploadTargets(directory: string, fileNames: string[]): Up
     }
 
     conflicts.push(fileName);
-    if (!stat.isFile() || stat.isSymbolicLink()) nonReplaceable.push(fileName);
+    if (fileNames.some(name => name.startsWith(fileName + "/")) || !stat.isFile() || stat.isSymbolicLink()) nonReplaceable.push(fileName);
   }
 
   return { conflicts, nonReplaceable };
+}
+
+/** Name suggested for keep-both; actual creation must still use exclusive flags. */
+export function uploadRename(name: string, attempt: number, directory: boolean): string {
+  if (attempt === 0) return name;
+  const extension = directory ? "" : path.extname(name);
+  return `${name.slice(0, name.length - extension.length)} (${attempt})${extension}`;
 }

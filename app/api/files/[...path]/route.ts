@@ -1,4 +1,6 @@
 import { PROTECTED_FILE_NAMES } from "@/lib/file-operations";
+import { getTenantStore } from "@/lib/tenant-store";
+import { isProtectedFilePath } from "@/lib/file-operations";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
@@ -25,6 +27,7 @@ import {
   normalizeUploadFilePath,
   parseUploadConflictStrategy,
   validateUploadFileNames,
+  uploadRename,
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
@@ -87,6 +90,17 @@ async function getUploadDirectory(request: Request, segments: string[]): Promise
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
+  const requestedCwd = new URL(request.url).searchParams.get("cwd");
+  const currentRoot = requestedCwd ? workspacePathFromClient(session, requestedCwd) : [...allowedRoots].filter(root => isFilePathAllowed(directory, new Set([root]))).sort((a, b) => b.length - a.length)[0];
+  if (!currentRoot || ![...allowedRoots].some(root => samePath(root, currentRoot))
+    || !isFilePathAllowed(directory, new Set([currentRoot])) || isProtectedFilePath(currentRoot, directory)) {
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
+  const nestedRoots = getTenantStore().listActiveWorkspaces(session.tenant.id).map(workspace => workspace.rootPath)
+    .filter(root => !samePath(root, currentRoot) && isFilePathAllowed(root, new Set([currentRoot])));
+  if (nestedRoots.some(root => isFilePathAllowed(directory, new Set([root])))) {
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
   let stat: fs.Stats;
   try {
     stat = fs.statSync(directory);
@@ -108,7 +122,7 @@ async function getUploadDirectory(request: Request, segments: string[]): Promise
       // Ignore stale session roots that no longer exist.
     }
   }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
+  if (!isFilePathAllowed(realDirectory, realRoots) || !isExistingFilePathAllowed(directory, new Set([currentRoot]))) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
@@ -125,6 +139,7 @@ function normalizedUploadFileNames(fileNames: string[]): string[] {
 }
 
 function checkUploadParents(directory: string, fileName: string): void {
+  if (isProtectedFilePath(directory, path.join(directory, fileName))) throw new Error("Protected paths cannot be uploaded");
   let parent = directory;
   for (const part of fileName.split("/").slice(0, -1)) {
     parent = path.join(parent, part);
@@ -167,7 +182,6 @@ export async function POST(
   }
 
   try {
-    const hostAccess = canManageHostConfiguration(requireTenantSession(request));
     const { path: segments } = await params;
     const uploadDirectory = await getUploadDirectory(request, segments);
     if ("response" in uploadDirectory) return uploadDirectory.response;
@@ -246,6 +260,9 @@ export async function POST(
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid upload path" }, { status: 400 });
     }
+    const authorized = await getUploadDirectory(request, segments);
+    if ("response" in authorized) return authorized.response;
+    if (!samePath(directory, authorized.directory)) return NextResponse.json({ error: "Upload target changed" }, { status: 409 });
     const inspection = inspectUploadTargets(directory, normalizedFileNames);
     if (strategy === "error" && inspection.conflicts.length > 0) {
       return NextResponse.json({
@@ -261,47 +278,70 @@ export async function POST(
     const skipped: string[] = [];
     const errors: Array<{ name: string; error: string }> = [];
 
-    for (const [index, file] of files.entries()) {
-      const fileName = normalizedFileNames[index];
-      let parent: string;
-      try {
-        parent = ensureUploadParent(directory, fileName);
-      } catch (error) {
-        errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
-        continue;
-      }
-      const destination = path.join(parent, path.basename(fileName));
-      if (conflictSet.has(fileName) && strategy === "skip") {
-        skipped.push(fileName);
-        continue;
-      }
-      if (conflictSet.has(fileName) && nonReplaceableSet.has(fileName)) {
-        errors.push({ name: fileName, error: "Cannot replace a directory or symbolic link" });
-        continue;
-      }
-
-      let bytes: Buffer;
-      try {
-        bytes = Buffer.from(await file.arrayBuffer());
-      } catch (error) {
-        errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
-        continue;
-      }
-
-      if (conflictSet.has(fileName)) {
+    // Claim each incoming folder exclusively before writing its contents. Existing
+    // folders are never merged, even when none of the incoming leaf names collide.
+    const folderNames = new Set(normalizedFileNames.filter(name => name.includes("/")).map(name => name.split("/")[0]));
+    const folderTargets = new Map<string, string>();
+    const folderFailures = new Map<string, string>();
+    const folderIdentity = new Map<string, { dev: number; ino: number }>();
+    for (const name of folderNames) {
+      if (conflictSet.has(name) && strategy === "skip") continue;
+      let attempt = 0;
+      while (true) {
+        const candidate = uploadRename(name, attempt, true);
         try {
-          fs.unlinkSync(destination);
+          fs.mkdirSync(path.join(directory, candidate));
+          folderTargets.set(name, candidate);
+          folderIdentity.set(name, fs.lstatSync(path.join(directory, candidate)));
+          break;
         } catch (error) {
-          errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
-          continue;
+          if ((error as NodeJS.ErrnoException).code === "EEXIST" && strategy === "rename") { attempt++; continue; }
+          folderFailures.set(name, "Cannot replace or merge an existing folder");
+          break;
         }
       }
-
+    }
+    for (const [index, file] of files.entries()) {
+      const originalName = normalizedFileNames[index];
+      const rootName = originalName.split("/")[0];
+      const folder = folderNames.has(rootName);
+      if (conflictSet.has(rootName) && strategy === "skip") { skipped.push(originalName); continue; }
+      if (folderFailures.has(rootName)) { errors.push({ name: originalName, error: folderFailures.get(rootName)! }); continue; }
+      if (!folder && conflictSet.has(rootName) && nonReplaceableSet.has(rootName) && strategy !== "rename") {
+        errors.push({ name: originalName, error: "Cannot replace a directory or symbolic link" }); continue;
+      }
       try {
-        fs.writeFileSync(destination, bytes, { flag: "wx" });
-        uploaded.push(fileName);
+        const bytes = Buffer.from(await file.arrayBuffer());
+        const currentAuthorization = await getUploadDirectory(request, segments);
+        if ("response" in currentAuthorization || !samePath(currentAuthorization.directory, directory)) throw new Error("Upload target no longer available");
+        if (folder) {
+          const claimed = folderIdentity.get(rootName)!;
+          const actual = fs.lstatSync(path.join(directory, folderTargets.get(rootName)!));
+          if (!actual.isDirectory() || actual.isSymbolicLink() || actual.dev !== claimed.dev || actual.ino !== claimed.ino) throw new Error("Upload folder changed");
+        }
+        let attempt = 0;
+        while (true) {
+          const fileName = folder ? folderTargets.get(rootName)! + originalName.slice(rootName.length) : uploadRename(originalName, attempt, false);
+          const parent = ensureUploadParent(directory, fileName);
+          const destination = path.join(parent, path.basename(fileName));
+          // Recheck the entry after reading the body. A replacement must still be
+          // an ordinary file; no await occurs between this check and creation.
+          if (!folder && strategy === "overwrite" && conflictSet.has(rootName)) {
+            const stat = fs.lstatSync(destination);
+            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Cannot replace a directory or symbolic link");
+            fs.unlinkSync(destination);
+          }
+          try {
+            fs.writeFileSync(destination, bytes, { flag: "wx" });
+            uploaded.push(fileName);
+            break;
+          } catch (error) {
+            if (!folder && strategy === "rename" && (error as NodeJS.ErrnoException).code === "EEXIST") { attempt++; continue; }
+            throw error;
+          }
+        }
       } catch (error) {
-        errors.push({ name: fileName, error: hostAccess ? String(error) : "Upload failed" });
+        errors.push({ name: originalName, error: error instanceof Error && !("code" in error) ? error.message : "Upload failed" });
       }
     }
 
