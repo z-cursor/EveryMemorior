@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, symlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -117,4 +117,52 @@ test('undo rejects a replacement original parent and tokens scoped to a differen
 test('continues after a missing item and picks the next available filename without altering extension',async()=>{
  const source=join(workspace,'image.jpg');writeFileSync(source,'pixels');const target=join(workspace,'Images');mkdirSync(target);writeFileSync(join(target,'image.jpg'),'first');writeFileSync(join(target,'image (1).jpg'),'second');
  const data=await (await POST(request({operation:'move',cwd:workspace,paths:[join(workspace,'absent.jpg'),source],target,strategy:'rename'}))).json();assert.deepEqual(data.results.map(r=>r.status),['failed','success']);assert.equal(data.results[1].destination,join(target,'image (2).jpg'));
+});
+
+ test('current workspace mutations cannot enter a registered workspace through a symbolic alias', async () => {
+  const nested = join(workspace, 'PrivateAliasTarget');
+  mkdirSync(nested); writeFileSync(join(nested, 'note.txt'), 'foreign content');
+  getTenantStore().ensureWorkspace({tenantId:auth.session.tenant.id,membershipId:auth.session.membership.id},{name:'PrivateAliasTarget',rootPath:nested});
+  const alias = join(workspace, 'AliasToPrivate'); symlinkSync(nested, alias, 'dir');
+  const local=join(workspace,'local-alias-move.txt');writeFileSync(local,'local content');
+  for (const body of [
+   {operation:'move',paths:[local],target:alias},
+   {operation:'delete', paths:[join(alias,'note.txt')]},
+   {operation:'move', paths:[join(alias,'note.txt')],target:workspace},
+   {operation:'mkdir',target:alias,name:'Injected'},
+  ]) assert.equal((await POST(request({cwd:workspace,...body}))).status,403);
+  assert.equal(readFileSync(local,'utf8'),'local content');
+  assert.equal(readFileSync(join(nested,'note.txt'),'utf8'),'foreign content');
+  assert.equal(existsSync(join(nested,'Injected')),false);
+ });
+
+test('canonical protected targets and newly registered undo workspaces remain unchanged', async () => {
+ const protectedRoot=join(workspace,'.git');
+ const alias=join(workspace,'ProtectedAlias');symlinkSync(protectedRoot,alias,'dir');
+ const source=join(workspace,'private-move.txt');writeFileSync(source,'keep');
+ for(const body of [
+  {operation:'delete',paths:[join(alias,'config')]},
+  {operation:'move',paths:[source],target:alias},
+  {operation:'mkdir',target:alias,name:'Injected'},
+ ]) {
+  const response=await POST(request({cwd:workspace,...body}));
+  const data=await response.json();assert.ok(response.status!==200 || data.results.every(item=>item.status==='failed'));
+ }
+ assert.equal(readFileSync(join(protectedRoot,'config'),'utf8'),'private');
+ assert.equal(readFileSync(source,'utf8'),'keep');assert.equal(existsSync(join(protectedRoot,'Injected')),false);
+ const target=join(workspace,'FutureWorkspace');mkdirSync(target);
+ const moved=(await (await POST(request({operation:'move',cwd:workspace,paths:[source],target}))).json()).results[0];
+ assert.equal(moved.status,'success');
+ const registeredAlias=join(workspace,'FutureWorkspaceAlias');symlinkSync(target,registeredAlias,'dir');
+ getTenantStore().ensureWorkspace({tenantId:auth.session.tenant.id,membershipId:auth.session.membership.id},{name:'FutureWorkspace',rootPath:registeredAlias});
+ const denied=await POST(request({operation:'undo',cwd:workspace,tokens:[moved.undoToken]}));assert.equal(denied.status,403);
+ assert.equal(readFileSync(join(target,'private-move.txt'),'utf8'),'keep');
+ assert.equal((await POST(request({operation:'delete',cwd:workspace,paths:[target]}))).status,403);
+});
+
+test('an explicitly selected nested workspace can manage its own files', async () => {
+ const nested=join(workspace,'SelectedNested');mkdirSync(nested);allowFileRoot(nested);
+ getTenantStore().ensureWorkspace({tenantId:auth.session.tenant.id,membershipId:auth.session.membership.id},{name:'SelectedNested',rootPath:nested});
+ const response=await POST(request({operation:'mkdir',cwd:nested,target:nested,name:'Mine'}));
+ assert.equal(response.status,200);assert.equal(existsSync(join(nested,'Mine')),true);
 });

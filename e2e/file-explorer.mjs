@@ -467,7 +467,8 @@ try {
   assert.equal(fs.readFileSync(join(workspace,'alpha.txt'),'utf8'),'alpha content');
   // A missing item fails independently; later selected items still move.
   page = await fresh(undefined,()=>fs.writeFileSync(join(workspace,'gamma.txt'),'gamma content'));
-  for(const name of ['alpha.txt','beta.txt','gamma.txt']) await row(page,name).getByRole('checkbox').check();
+  await page.getByRole('textbox',{name:'Search files',exact:true}).fill('.txt');
+  for(const name of ['alpha.txt','beta.txt','gamma.txt']) await row(page,name).first().getByRole('checkbox').check();
   fs.unlinkSync(join(workspace,'beta.txt'));
   await page.getByRole('button',{name:'Move to…'}).click();
   const partialPicker=page.getByRole('dialog',{name:'Choose folder'});
@@ -476,6 +477,45 @@ try {
   await page.getByRole('status').filter({hasText:'2 succeeded, 0 skipped, 1 failed'}).waitFor();
   assert.equal(fs.readFileSync(join(workspace,'Destination/gamma.txt'),'utf8'),'gamma content');
   assert.match(await page.locator('[data-file-drop-controls]').first().textContent(),/1 selected/);
+  // A move may leave skipped entries selected even when it reveals destinations from search.
+  page = await fresh(undefined, () => fs.writeFileSync(join(workspace,'Destination/beta.txt'),'existing'));
+  await page.getByRole('textbox',{name:'Search files',exact:true}).fill('.txt');
+  await row(page,'alpha.txt').first().getByRole('checkbox').check();
+  await row(page,'beta.txt').first().getByRole('checkbox').check();
+  await page.getByRole('button',{name:'Move to…'}).click();
+  let searchPicker = page.getByRole('dialog',{name:'Choose folder'});
+  await searchPicker.getByRole('button',{name:'📁 Destination',exact:true}).click();
+  await searchPicker.getByRole('button',{name:'Move here'}).click();
+  await page.getByRole('dialog',{name:'Name conflict'}).getByRole('button',{name:'Skip',exact:true}).click();
+  await page.getByRole('status').filter({hasText:'1 succeeded, 1 skipped, 0 failed'}).waitFor();
+  assert.equal(await row(page,'beta.txt').getByRole('checkbox').isChecked(),true);
+  assert.match(await page.locator('[data-file-drop-controls]').first().textContent(),/1 selected/);
+  await row(page,'Destination/alpha.txt').waitFor();
+  await page.getByRole('textbox',{name:'Search files',exact:true}).fill('beta');
+  assert.equal(await page.getByRole('checkbox',{checked:true}).count(),0);
+
+  // Directory selection keeps its type when its parent is collapsed.
+  page = await fresh(undefined, () => fs.mkdirSync(join(workspace,'Folder/Child/Descendant'),{recursive:true}));
+  await row(page,'Folder').click();
+  await row(page,'Folder/Child').getByRole('checkbox').check();
+  await row(page,'alpha.txt').getByRole('checkbox').check();
+  await row(page,'Folder').click();
+  await row(page,'Folder/Child').waitFor({state:'hidden'});
+  await page.getByRole('button',{name:'Move to…'}).click();
+  let hiddenPicker = page.getByRole('dialog',{name:'Choose folder'});
+  await hiddenPicker.getByRole('button',{name:'📁 Folder',exact:true}).click();
+  assert.equal(await hiddenPicker.getByRole('button',{name:'📁 Child',exact:true}).isDisabled(),true);
+  await hiddenPicker.getByRole('button',{name:'Cancel',exact:true}).click();
+  // Expand the parent while hovering: the hidden selected child is still an invalid target.
+  const hiddenDrag = await page.evaluateHandle(() => new DataTransfer());
+  await row(page,'alpha.txt').dispatchEvent('dragstart',{dataTransfer:hiddenDrag});
+  await row(page,'Folder').dispatchEvent('dragover',{dataTransfer:hiddenDrag});
+  await row(page,'Folder/Child').waitFor();
+  await row(page,'Folder/Child').dispatchEvent('dragover',{dataTransfer:hiddenDrag});
+  assert.match(await page.locator('[data-file-drag-feedback]').textContent(),/Cannot drop here/);
+  await row(page,'Folder/Child').dispatchEvent('drop',{dataTransfer:hiddenDrag});
+  await hiddenDrag.dispose();
+  assert.equal(fs.existsSync(join(workspace,'alpha.txt')),true);
   assert.deepEqual(serverErrors, []);
   assert.deepEqual(browserErrors, []);
   assert.equal(requests.some(request => request.path.startsWith('/api/agent')), false);

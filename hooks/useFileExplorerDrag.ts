@@ -14,6 +14,7 @@ interface Options {
   container: RefObject<HTMLDivElement | null>;
   cwd: string;
   selected: Set<string>;
+  isDirectory: (path: string) => boolean;
   busy: boolean;
   expand: (path: string) => void;
   move: (paths: string[], target: string) => void;
@@ -130,7 +131,7 @@ export function useFileExplorerDrag(options: Options) {
       if (!row || current.current.busy || element?.closest('button,input')) { event.preventDefault(); return; }
       const path = row.dataset.filePath!;
       const paths = current.current.selected.has(path) ? [...current.current.selected] : [path];
-      const directories = paths.filter(value => current.current.container.current?.querySelector(`[data-file-path="${CSS.escape(value)}"]`)?.getAttribute('data-file-directory') === 'true');
+      const directories = paths.filter(current.current.isDirectory);
       session.current = { operation: "move", paths, directories, count: paths.length, cwd: current.current.cwd };
       cancelled.current = false;
       event.dataTransfer.setData(INTERNAL_FILES, path);

@@ -5,6 +5,7 @@ import { FileDirectoryPicker } from "./FileDirectoryPicker";
 import { FileSelectionContext, FileSelectionCheckbox } from "./FileSelection";
 import { useFileExplorerDrag } from "@/hooks/useFileExplorerDrag";
 import { FileDragTargetContext } from "./FileDragContext";
+import { normalizeFileSelection } from "@/lib/file-selection";
 import { useFileOperations } from "@/hooks/useFileOperations";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import {
@@ -293,6 +294,8 @@ function TreeNode({
   t: Translate;
 }) {
   const selection = useContext(FileSelectionContext);
+  const registerNode = selection?.registerNode;
+  useEffect(() => { registerNode?.(node.fullPath, node.isDir); }, [registerNode, node.fullPath, node.isDir]);
   const dropTarget = useContext(FileDragTargetContext) === node.fullPath;
   const open = expandedPaths.has(node.fullPath);
   const highlighted = highlightedPaths.has(node.fullPath);
@@ -573,6 +576,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onFileSearchOpenChange,
 }, ref) {
   const { t } = useI18n();
+  // Keep node metadata after collapsed descendants leave the rendered tree.
+  const nodeTypes = useRef({ cwd, entries: new Map<string, boolean>() });
+  if (nodeTypes.current.cwd !== cwd) nodeTypes.current = { cwd, entries: new Map() };
+  const registerNode = useCallback((path: string, isDirectory: boolean) => {
+    nodeTypes.current.entries.set(path, isDirectory);
+  }, []);
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [selected,setSelected]=useState<Set<string>>(new Set());
   const selectionAnchor=useRef<string|null>(null);
@@ -634,10 +643,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     selectionAnchor.current = path;
   }
 
-  function normalizedSelection(paths: string[]) {
-    return paths.filter(path => !paths.some(other => path !== other && path.startsWith(other + '/')));
-  }
-
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
@@ -680,7 +685,14 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const directoryInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(()=>{setSelected(new Set());selectionAnchor.current=null;setMovePicker(false);setDeletePaths(null);setOperationResults([]);setOperationError('');},[cwd,searchQuery,fileSearchOpen,setOperationResults,setOperationError]);
+  useEffect(()=>{setSelected(new Set());selectionAnchor.current=null;setMovePicker(false);setDeletePaths(null);setOperationResults([]);setOperationError('');},[cwd,fileSearchOpen,setOperationResults,setOperationError]);
+  function changeSearchQuery(query: string) {
+    setSelected(new Set());
+    selectionAnchor.current = null;
+    setOperationResults([]);
+    setOperationError('');
+    setSearchQuery(query);
+  }
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
   const hasSearchQuery = searchQuery.trim().length > 0;
@@ -968,7 +980,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [cwd, onAtMentions, uploadSummary]);
 
   const drag = useFileExplorerDrag({
-    container: explorerRef, cwd, selected, busy: operationBusy || uploadBusy,
+    container: explorerRef, cwd, selected, isDirectory: path => nodeTypes.current.entries.get(path) === true, busy: operationBusy || uploadBusy,
     expand: path => {
       setExpandedPaths(previous => new Set([...previous, path]));
       setSearchExpanded(previous => new Set([...previous, path]));
@@ -979,7 +991,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   });
 
   return (
-    <FileSelectionContext.Provider value={{selected,toggle:toggleSelection}}>
+    <FileSelectionContext.Provider value={{selected,toggle:toggleSelection,registerNode}}>
     <FileDragTargetContext.Provider value={drag.feedback?.target ?? null}>
     <div ref={explorerRef} data-file-explorer style={{ minHeight: "100%", position: "relative" }} {...drag.handlers}>
       <div data-file-drop-root data-file-drop-active={drag.feedback?.target === cwd || undefined}
@@ -993,9 +1005,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       </div>}
       <div data-file-drop-controls style={{padding:8,display:'flex',gap:5,flexWrap:'wrap'}}>
         <button className="file-operation-button" onClick={()=>setSelected(new Set(visiblePaths()))}>{t('files.selectVisible')}</button><button className="file-operation-button" onClick={()=>setSelected(new Set())}>{t('files.clearSelection')}</button>
-        {selected.size>0&&<><span style={{flexBasis:'100%',fontSize:'var(--font-size-caption)',color:'var(--text-muted)'}}>{t('files.selectionCount',{count:selected.size})}</span><button className="file-operation-button" disabled={!onAtMentions} onClick={()=>onAtMentions?.([...selected].map(p=>getRelativeFilePath(p,cwd)))}>{t('files.referenceSelected')}</button><button className="file-operation-button" disabled={operationBusy} onClick={()=>setMovePicker(true)}>{t('files.moveTo')}</button><button className="file-operation-button" disabled={operationBusy} onClick={()=>setDeletePaths(normalizedSelection([...selected]))}>{t('files.delete')}</button></>}
+        {selected.size>0&&<><span style={{flexBasis:'100%',fontSize:'var(--font-size-caption)',color:'var(--text-muted)'}}>{t('files.selectionCount',{count:selected.size})}</span><button className="file-operation-button" disabled={!onAtMentions} onClick={()=>onAtMentions?.([...selected].map(p=>getRelativeFilePath(p,cwd)))}>{t('files.referenceSelected')}</button><button className="file-operation-button" disabled={operationBusy} onClick={()=>setMovePicker(true)}>{t('files.moveTo')}</button><button className="file-operation-button" disabled={operationBusy} onClick={()=>setDeletePaths(normalizeFileSelection([...selected]))}>{t('files.delete')}</button></>}
       </div>
-      {movePicker&&<FileDirectoryPicker cwd={cwd} disabledPaths={[...selected].filter(p=>explorerRef.current?.querySelector(`[data-file-path="${CSS.escape(p)}"]`)?.getAttribute('data-file-directory')==='true')} onCancel={()=>setMovePicker(false)} onSelect={target=>{setMovePicker(false);void performOperation('move',[...selected],target);}}/>}
+      {movePicker&&<FileDirectoryPicker cwd={cwd} disabledPaths={[...selected].filter(p=>nodeTypes.current.entries.get(p) === true)} onCancel={()=>setMovePicker(false)} onSelect={target=>{setMovePicker(false);void performOperation('move',[...selected],target);}}/>}
       {deletePaths&&<div role="dialog" aria-modal="true" aria-label={t('files.delete')} style={{position:'fixed',inset:0,zIndex:100,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',color:'var(--text)',maxWidth:'90vw'}}><p>{t('files.batchDeleteWarning')}</p><ul>{deletePaths.map(p=><li key={p}>{getRelativeFilePath(p,cwd)}</li>)}</ul><button className="file-operation-button" onClick={()=>setDeletePaths(null)}>{t('files.cancel')}</button><button className="file-operation-button" onClick={()=>{const paths=deletePaths;setDeletePaths(null);void performOperation('delete',paths);}}>{t('files.delete')}</button></div></div>}
       {canUndo && <button className="file-operation-button" disabled={operationBusy} onClick={() => void undoOperation()}>{t('files.undoMove')}</button>}
       {operationBusy && <button className="file-operation-button" onClick={cancelOperation}>{t('files.cancelRemaining')}</button>}
@@ -1138,7 +1150,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           <input
             ref={searchInputRef}
             value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
+            onChange={(event) => changeSearchQuery(event.target.value)}
             onKeyDown={(event) => { if (event.key === "Escape") onFileSearchOpenChange?.(false); }}
             placeholder={t("sidebar.searchFilesPlaceholder")}
             aria-label={t("sidebar.searchFiles")}
@@ -1147,7 +1159,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           {searchQuery && (
             <button
               type="button"
-              onClick={() => setSearchQuery("")}
+              onClick={() => changeSearchQuery("")}
               title={t("sidebar.clearSearch")}
               aria-label={t("sidebar.clearSearch")}
               style={{ position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, padding: 0, border: "none", borderRadius: "var(--radius-sm)", background: "none", color: "var(--text-dim)", cursor: "pointer" }}

@@ -1,3 +1,4 @@
+import { isWorkspaceMutationPathAllowed } from '@/lib/path-security';
 import { PROTECTED_FILE_NAMES } from "@/lib/file-operations";
 import { getTenantStore } from "@/lib/tenant-store";
 import { isProtectedFilePath } from "@/lib/file-operations";
@@ -96,9 +97,9 @@ async function getUploadDirectory(request: Request, segments: string[]): Promise
     || !isFilePathAllowed(directory, new Set([currentRoot])) || isProtectedFilePath(currentRoot, directory)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
-  const nestedRoots = getTenantStore().listActiveWorkspaces(session.tenant.id).map(workspace => workspace.rootPath)
-    .filter(root => !samePath(root, currentRoot) && isFilePathAllowed(root, new Set([currentRoot])));
-  if (nestedRoots.some(root => isFilePathAllowed(directory, new Set([root])))) {
+  const otherRoots = getTenantStore().listActiveWorkspaces(session.tenant.id).map(workspace => workspace.rootPath)
+    .filter(root => !samePath(root, currentRoot));
+  if (!isWorkspaceMutationPathAllowed(directory, currentRoot, otherRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
   let stat: fs.Stats;
@@ -114,6 +115,9 @@ async function getUploadDirectory(request: Request, segments: string[]): Promise
   // A browsable directory can be a symlink. Resolve both sides before writes
   // so a symlink inside an allowed root cannot redirect uploads outside it.
   const realDirectory = fs.realpathSync(directory);
+  if (isProtectedFilePath(fs.realpathSync(currentRoot), realDirectory)) {
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
   const realRoots = new Set<string>();
   for (const root of allowedRoots) {
     try {

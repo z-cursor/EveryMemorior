@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { isExistingFilePathAllowed, isFilePathAllowed } from './file-access';
+import { isWorkspaceMutationPathAllowed, resolvePathWithExistingAncestor } from './path-security';
 import { samePath } from './paths';
 import type { FileOperationRequest, FileOperationResult } from './file-operation-types';
 
@@ -133,11 +134,13 @@ function renamed(destination: string, isDir: boolean, index: number) { const ext
 export function fileUndoPaths(tokens: string[], scope: string, root: string): string[] {
   return tokens.flatMap(token => { const record = records().get(token); return record && record.scope === scope && samePath(record.root, root) && record.expires > Date.now() ? [record.source, record.destination] : []; });
 }
-export function executeFileOperations(input: FileOperationRequest, root: string, scope = ''): FileOperationResult[] {
+export function executeFileOperations(input: FileOperationRequest, root: string, scope = '', otherRoots: string[] = []): FileOperationResult[] {
   for (const [token, record] of records()) if (record.expires < Date.now()) records().delete(token);
   const roots = new Set([root]);
   function validate(value: string, existing = true) {
-    if (!isFilePathAllowed(value, roots) || isProtectedFilePath(root, value) || (existing && !isExistingFilePathAllowed(value, roots))) throw new Error('Access denied');
+    const canonical = resolvePathWithExistingAncestor(value);
+    const canonicalRoot = resolvePathWithExistingAncestor(root);
+    if (!isWorkspaceMutationPathAllowed(value, root, otherRoots) || !canonical || !canonicalRoot || isProtectedFilePath(canonicalRoot, canonical) || !isFilePathAllowed(value, roots) || isProtectedFilePath(root, value) || (existing && !isExistingFilePathAllowed(value, roots))) throw new Error('Access denied');
     if (existing && fs.lstatSync(value).isSymbolicLink()) throw new Error('Symbolic links cannot be changed');
   }
   if (input.operation === 'mkdir') {
@@ -160,6 +163,7 @@ export function executeFileOperations(input: FileOperationRequest, root: string,
       if (stopped || input.strategy === 'cancel') return { source, status: 'pending', error: 'Canceled; completed moves are kept' };
       if (undo && (!record || record.scope !== scope || !samePath(record.root, root) || record.expires <= Date.now())) throw new Error('Undo is unavailable');
       validate(source);
+      if (!isWorkspaceMutationPathAllowed(source, root, otherRoots, true)) throw new Error('Access denied');
       if (samePath(source, root)) throw new Error('Workspace roots cannot be changed');
       const stat = fs.lstatSync(source);
       if (!stat.isFile() && !stat.isDirectory()) throw new Error('Only files and directories can be changed');

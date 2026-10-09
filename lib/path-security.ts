@@ -40,3 +40,37 @@ export function isExistingPathWithinRoots(target: string, roots: Set<string>): b
   }
   return isPathWithinRoots(realTarget, realRoots);
 }
+
+/** Resolve a future destination through its nearest existing parent. */
+export function resolvePathWithExistingAncestor(target: string): string | null {
+  let ancestor = path.resolve(target);
+  const suffix: string[] = [];
+  while (true) {
+    try { return path.join(realpathSync(ancestor), ...suffix); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return null;
+      suffix.unshift(path.basename(ancestor)); ancestor = parent;
+    }
+  }
+}
+
+/** A mutation belongs to one Workspace, including canonical aliases and nested roots. */
+export function isWorkspaceMutationPathAllowed(target: string, root: string, otherRoots: string[], includesChildren = false): boolean {
+  if (!isPathWithinRoots(target, new Set([root]))) return false;
+  const realTarget = resolvePathWithExistingAncestor(target);
+  const realRoot = resolvePathWithExistingAncestor(root);
+  if (!realTarget || !realRoot || !isPathWithinRoots(realTarget, new Set([realRoot]))) return false;
+  for (const other of otherRoots) {
+    const realOther = resolvePathWithExistingAncestor(other);
+    // A selected nested Workspace owns its narrower scope, even when a parent
+    // Workspace is registered. Siblings, descendants and aliases remain excluded.
+    const lexicalParent = isPathWithinRoots(root, new Set([other])) && !isPathWithinRoots(other, new Set([root]));
+    const canonicalParent = realOther && isPathWithinRoots(realRoot, new Set([realOther])) && !isPathWithinRoots(realOther, new Set([realRoot]));
+    if (lexicalParent || canonicalParent) continue;
+    if (isPathWithinRoots(target, new Set([other])) || (realOther && isPathWithinRoots(realTarget, new Set([realOther])))) return false;
+    if (includesChildren && (isPathWithinRoots(other, new Set([target])) || (realOther && isPathWithinRoots(realOther, new Set([realTarget]))))) return false;
+  }
+  return true;
+}

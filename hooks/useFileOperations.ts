@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { normalizeFileSelection } from '@/lib/file-selection';
 import type { FileOperationResult } from '@/lib/file-operation-types';
 type Choice = 'rename' | 'skip' | 'cancel';
 export function useFileOperations(cwd: string, onSuccess: (results: FileOperationResult[], target?: string) => void) {
@@ -22,7 +23,7 @@ export function useFileOperations(cwd: string, onSuccess: (results: FileOperatio
   async function perform(operation: 'move' | 'delete' | 'undo', paths: string[], target?: string) {
     if (busy) return;
     const workspace = cwd; const done: FileOperationResult[] = []; let strategy: Choice | undefined;
-    const normalized = operation === 'undo' ? paths : [...new Set(paths)].filter(p => !paths.some(other => p !== other && p.startsWith(other + '/')));
+    const normalized = operation === 'undo' ? paths : normalizeFileSelection(paths);
     canceled.current = false; setBusy(true); setError(''); setResults([]);
     async function request(item: string, choice?: Choice) {
       const response = await fetch('/api/files/operations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation, cwd: workspace, paths: operation === 'undo' ? undefined : [item], tokens: operation === 'undo' ? [item] : undefined, target, strategy: choice }) });
