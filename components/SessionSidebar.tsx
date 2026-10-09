@@ -116,6 +116,7 @@ interface Props {
     projectKey?: string | null,
   ) => void;
   onOpenFile?: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
+  onPathsMoved?: (results: import("@/lib/file-operation-types").FileOperationResult[]) => void;
   onOpenTerminal?: (cwd: string) => void;
   tenantWorkspaceOnly?: boolean;
   explorerRefreshKey?: number;
@@ -412,7 +413,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onSelectCompanion, companionActive, onCreateSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onProjectRemoved, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, tenantWorkspaceOnly, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onSelectCompanion, companionActive, onCreateSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onProjectRemoved, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onPathsMoved, onOpenTerminal, tenantWorkspaceOnly, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
@@ -2029,6 +2030,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onSelectCom
                 ref={fileExplorerRef}
                 cwd={selectedCwd ?? selectedCwdProp!}
                 onOpenFile={onOpenFile ?? (() => {})}
+                onPathsMoved={onPathsMoved}
                 refreshKey={explorerKey}
                 onAtMention={onAtMention}
                 onAtMentions={onAtMentions}

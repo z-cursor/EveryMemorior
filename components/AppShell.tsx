@@ -1053,6 +1053,19 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
+  const handlePathsMoved = useCallback((results: import('@/lib/file-operation-types').FileOperationResult[]) => {
+    function mapped(value: string) {
+      const match = results.find(r => r.destination && (value === r.source || (r.isDir && value.startsWith(r.source + '/'))));
+      return match ? match.destination! + value.slice(match.source.length) : value;
+    }
+    setFileTabs(previous => previous.map(tab => {
+      if (!tab.filePath) return tab;
+      const filePath = mapped(tab.filePath);
+      return filePath === tab.filePath ? tab : { ...tab, id: `file:${filePath}`, filePath, label: getFileName(filePath), viewerRevision: (tab.viewerRevision || 0) + 1 };
+    }));
+    setActiveFileTabId(previous => previous?.startsWith('file:') ? `file:${mapped(previous.slice(5))}` : previous);
+  }, []);
+
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null });
   }, [handleOpenFile, selectedSession?.id]);
@@ -1201,6 +1214,7 @@ export function AppShell() {
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
+        onPathsMoved={handlePathsMoved}
         onOpenTerminal={hostAccess ? handleOpenTerminal : undefined}
         tenantWorkspaceOnly={hostAccess !== true}
         explorerRefreshKey={explorerRefreshKey}

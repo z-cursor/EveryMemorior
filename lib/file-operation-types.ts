@@ -8,9 +8,10 @@ export interface FileOperationResult {
     undoToken?: string;
 }
 export interface FileOperationRequest {
-    operation: 'mkdir' | 'move' | 'delete';
+    operation: 'mkdir' | 'move' | 'delete' | 'undo';
     cwd: string;
     paths?: string[];
+    tokens?: string[];
     target?: string;
     name?: string;
     strategy?: 'error' | 'rename' | 'skip' | 'cancel';

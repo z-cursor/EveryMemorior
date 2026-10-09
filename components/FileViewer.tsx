@@ -1215,7 +1215,7 @@ function TextFileViewer({
       .then((d: FileData & { error?: string }) => {
         if (requestId !== contentRequestRef.current) return null;
         if (d.error) {
-          setError(d.error);
+          setError(d.error === "Not found" ? t("files.missingPath") : d.error);
           return null;
         }
         setError(null);
@@ -1229,7 +1229,7 @@ function TextFileViewer({
         setError(String(e));
         return null;
       });
-  }, [sourceSessionId]);
+  }, [sourceSessionId, t]);
 
   const fetchGitDiff = useCallback(async (targetPath: string) => {
     const requestId = ++gitDiffRequestRef.current;
