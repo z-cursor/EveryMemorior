@@ -79,3 +79,42 @@ test('cannot delete a folder containing another current workspace',async()=>{
  getTenantStore().ensureWorkspace({tenantId:auth.session.tenant.id,membershipId:auth.session.membership.id},{name:'Nested',rootPath:nested});
  const response=await POST(request({operation:'delete',cwd:workspace,paths:[container]}));assert.equal(response.status,403);assert.equal(existsSync(nested),true);
 });
+
+test('renames a colliding directory as a whole and issues scoped undo restoring content',async()=>{
+ const source=join(workspace,'Trips');mkdirSync(source);writeFileSync(join(source,'note.txt'),'mine');
+ const target=join(workspace,'Archive');mkdirSync(target);mkdirSync(join(target,'Trips'));writeFileSync(join(target,'Trips','note.txt'),'existing');
+ const moved=await POST(request({operation:'move',cwd:workspace,paths:[source],target,strategy:'rename'}));const result=(await moved.json()).results[0];
+ assert.equal(result.status,'success');assert.equal(result.destination,join(target,'Trips (1)'));assert.ok(result.undoToken);assert.equal(existsSync(source),false);
+ const undo=await POST(request({operation:'undo',cwd:workspace,tokens:[result.undoToken]}));assert.equal((await undo.json()).results[0].status,'success');assert.equal(existsSync(join(source,'note.txt')),true);
+});
+
+test('pauses at conflicts, preserves completed moves on cancel, and skips without overwriting',async()=>{
+ const a=join(workspace,'first.txt'),b=join(workspace,'second.txt'),c=join(workspace,'third.txt');for(const p of [a,b,c])writeFileSync(p,'source');
+ const target=join(workspace,'Batch');mkdirSync(target);writeFileSync(join(target,'second.txt'),'existing');
+ const data=await (await POST(request({operation:'move',cwd:workspace,paths:[a,b,c],target}))).json();assert.deepEqual(data.results.map(r=>r.status),['success','conflict','pending']);assert.equal(existsSync(a),false);assert.equal(existsSync(c),true);
+ const canceled=await (await POST(request({operation:'move',cwd:workspace,paths:[b,c],target,strategy:'cancel'}))).json();assert.deepEqual(canceled.results.map(r=>r.status),['pending','pending']);
+ const skipped=await (await POST(request({operation:'move',cwd:workspace,paths:[b,c],target,strategy:'skip'}))).json();assert.deepEqual(skipped.results.map(r=>r.status),['skipped','success']);assert.equal(existsSync(b),true);
+});
+
+test('undo handles new original conflicts, replaced objects and reused tokens safely',async()=>{
+ const source=join(workspace,'restore.txt');writeFileSync(source,'original');const target=join(workspace,'Undo');mkdirSync(target);
+ const moved=(await (await POST(request({operation:'move',cwd:workspace,paths:[source],target}))).json()).results[0];writeFileSync(source,'new');
+ const conflict=(await (await POST(request({operation:'undo',cwd:workspace,tokens:[moved.undoToken]}))).json()).results[0];assert.equal(conflict.status,'conflict');
+ const restored=(await (await POST(request({operation:'undo',cwd:workspace,tokens:[moved.undoToken],strategy:'rename'}))).json()).results[0];assert.equal(restored.destination,join(workspace,'restore (1).txt'));assert.equal(restored.status,'success');
+ const repeat=(await (await POST(request({operation:'undo',cwd:workspace,tokens:[moved.undoToken]}))).json()).results[0];assert.equal(repeat.status,'failed');
+ const source2=join(workspace,'replaced.txt');writeFileSync(source2,'before');const moved2=(await (await POST(request({operation:'move',cwd:workspace,paths:[source2],target}))).json()).results[0];rmSync(moved2.destination);writeFileSync(moved2.destination,'replacement');
+ const replaced=(await (await POST(request({operation:'undo',cwd:workspace,tokens:[moved2.undoToken]}))).json()).results[0];assert.equal(replaced.status,'failed');assert.equal(existsSync(source2),false);
+});
+
+test('undo rejects a replacement original parent and tokens scoped to a different workspace',async()=>{
+ const parent=join(workspace,'Old parent');mkdirSync(parent);const source=join(parent,'note.txt');writeFileSync(source,'keep');const target=join(workspace,'Secure undo');mkdirSync(target);
+ const moved=(await (await POST(request({operation:'move',cwd:workspace,paths:[source],target}))).json()).results[0];
+ const other=join(root,'other');const wrong=(await (await POST(request({operation:'undo',cwd:other,tokens:[moved.undoToken]}))).json()).results[0];assert.equal(wrong.status,'failed');
+ rmSync(parent,{recursive:true});mkdirSync(parent);
+ const result=(await (await POST(request({operation:'undo',cwd:workspace,tokens:[moved.undoToken]}))).json()).results[0];assert.equal(result.status,'failed');assert.equal(existsSync(moved.destination),true);assert.equal(existsSync(source),false);
+});
+
+test('continues after a missing item and picks the next available filename without altering extension',async()=>{
+ const source=join(workspace,'image.jpg');writeFileSync(source,'pixels');const target=join(workspace,'Images');mkdirSync(target);writeFileSync(join(target,'image.jpg'),'first');writeFileSync(join(target,'image (1).jpg'),'second');
+ const data=await (await POST(request({operation:'move',cwd:workspace,paths:[join(workspace,'absent.jpg'),source],target,strategy:'rename'}))).json();assert.deepEqual(data.results.map(r=>r.status),['failed','success']);assert.equal(data.results[1].destination,join(target,'image (2).jpg'));
+});

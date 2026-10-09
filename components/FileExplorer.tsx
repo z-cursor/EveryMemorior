@@ -37,6 +37,7 @@ interface FileNode {
 
 interface Props {
   cwd: string;
+  onPathsMoved?: (results: import("@/lib/file-operation-types").FileOperationResult[]) => void;
   onOpenFile: (filePath: string, fileName: string, options?: OpenFileOptions) => void;
   refreshKey?: number;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
@@ -554,6 +555,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   refreshKey,
   onAtMention,
   onAtMentions,
+  onPathsMoved,
   onUploadBusyChange,
   changesCollapsed,
   onChangesCountChange,
@@ -566,6 +568,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const selectionAnchor=useRef<string|null>(null);
   const explorerRef=useRef<HTMLDivElement>(null);
   const [movePicker,setMovePicker]=useState(false);
+  const [applyRemaining,setApplyRemaining]=useState(false);
   const [deletePaths,setDeletePaths]=useState<string[]|null>(null);
   const {
     busy: operationBusy,
@@ -574,7 +577,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     perform: performOperation,
     setResults: setOperationResults,
     setError: setOperationError,
+    conflict: moveConflict, chooseConflict, cancel: cancelOperation, canUndo, undo: undoOperation,
   } = useFileOperations(cwd, (successful, target) => {
+    if (successful.some(result => result.destination)) onPathsMoved?.(successful);
     setSelected(previous => new Set([...previous].filter(p =>
       !successful.some(result => p === result.source || p.startsWith(result.source + '/'))
     )));
@@ -956,8 +961,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       </div>
       {movePicker&&<FileDirectoryPicker cwd={cwd} disabledPaths={[...selected].filter(p=>explorerRef.current?.querySelector(`[data-file-path="${CSS.escape(p)}"]`)?.getAttribute('data-file-directory')==='true')} onCancel={()=>setMovePicker(false)} onSelect={target=>{setMovePicker(false);void performOperation('move',[...selected],target);}}/>}
       {deletePaths&&<div role="dialog" aria-modal="true" aria-label={t('files.delete')} style={{position:'fixed',inset:0,zIndex:100,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',color:'var(--text)',maxWidth:'90vw'}}><p>{t('files.batchDeleteWarning')}</p><ul>{deletePaths.map(p=><li key={p}>{getRelativeFilePath(p,cwd)}</li>)}</ul><button onClick={()=>setDeletePaths(null)}>{t('files.cancel')}</button><button onClick={()=>{const paths=deletePaths;setDeletePaths(null);void performOperation('delete',paths);}}>{t('files.delete')}</button></div></div>}
+      {canUndo && <button disabled={operationBusy} onClick={() => void undoOperation()}>{t('files.undoMove')}</button>}
+      {operationBusy && <button onClick={cancelOperation}>{t('files.cancelRemaining')}</button>}
+      {moveConflict && <div role="dialog" aria-modal="true" aria-label={t('files.moveConflict')} style={{position:'fixed',inset:0,zIndex:110,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',maxWidth:'90vw'}}><p>{t('files.moveConflict')}</p><p style={{overflowWrap:'anywhere'}}>{moveConflict.source} → {moveConflict.destination}</p><label><input type="checkbox" checked={applyRemaining} onChange={e=>setApplyRemaining(e.target.checked)}/>{t('files.applyRemaining')}</label><div><button onClick={()=>chooseConflict('rename',applyRemaining)}>{t('files.keepBoth')}</button><button onClick={()=>chooseConflict('skip',applyRemaining)}>{t('files.skipConflict')}</button><button onClick={()=>chooseConflict('cancel',false)}>{t('files.cancel')}</button></div><p>{t('files.cancelKeepsCompleted')}</p></div></div>}
       {operationError&&<p role="alert">{operationError}</p>}
-      {operationResults.length>0&&<div role="status" style={{padding:8}}>{t('files.operationSummary',{success:operationResults.filter(r=>r.status==='success').length,skipped:operationResults.filter(r=>r.status==='skipped').length,failed:operationResults.filter(r=>r.status==='failed'||r.status==='conflict').length})}{operationResults.map(r=><div key={r.source} style={{overflowWrap:'anywhere'}}>{getRelativeFilePath(r.source,cwd)} → {r.destination?getRelativeFilePath(r.destination,cwd):''} {r.error}</div>)}</div>}
+      {operationResults.length>0&&<div role="status" style={{padding:8}}>{t('files.operationSummary',{success:operationResults.filter(r=>r.status==='success').length,skipped:operationResults.filter(r=>r.status==='skipped').length,failed:operationResults.filter(r=>r.status==='failed'||r.status==='conflict').length})}<span>{t('files.pendingCount',{count:operationResults.filter(r=>r.status==='pending').length})}</span>{operationResults.map(r=><div key={r.source} style={{overflowWrap:'anywhere'}}>{getRelativeFilePath(r.source,cwd)} → {r.destination?getRelativeFilePath(r.destination,cwd):''} {r.error}</div>)}</div>}
       {uploadPicker && <FileDirectoryPicker key={cwd} cwd={cwd} finalAction={t("files.uploadHere")} onCancel={() => setUploadPicker(null)} onSelect={target => {
         chosenUploadTarget.current = { target, workspace: cwd };
         const picker = uploadPicker;

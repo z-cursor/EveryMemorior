@@ -566,7 +566,7 @@ function ImageViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
         }}
       >
         {error ? (
-          <div style={{ color: "var(--palette-red-400)", fontSize: "var(--font-size-label)" }}>{error}</div>
+          <div style={{ color: "var(--palette-red-400)", fontSize: "var(--font-size-label)" }}>{error === "Not found" ? t("files.missingPath") : error}</div>
         ) : (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -733,7 +733,7 @@ function AudioViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
         <div style={{ width: "min(680px, 100%)" }}>
           {error && (
             <div style={{ color: "var(--palette-red-400)", fontSize: "var(--font-size-label)", marginBottom: 12, textAlign: "center" }}>
-              {error}
+              {error === "Not found" ? t("files.missingPath") : error}
             </div>
           )}
           <audio
@@ -887,7 +887,7 @@ function VideoViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }: Pr
         <div style={{ width: "min(960px, 100%)", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
           {error && (
             <div style={{ color: "var(--palette-red-400)", fontSize: "var(--font-size-label)", marginBottom: 12, textAlign: "center" }}>
-              {error}
+              {error === "Not found" ? t("files.missingPath") : error}
             </div>
           )}
           <video
@@ -1062,7 +1062,7 @@ function DocumentViewer({ filePath, cwd, sourceSessionId, watchEnabled = true }:
       <div style={{ flex: 1, minHeight: 0, background: "var(--bg-panel)" }}>
         {error ? (
           <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, color: "var(--palette-red-400)", fontSize: "var(--font-size-label)", textAlign: "center" }}>
-            {error}
+            {error === "Not found" ? t("files.missingPath") : error}
           </div>
         ) : (
           <iframe
@@ -1215,7 +1215,7 @@ function TextFileViewer({
       .then((d: FileData & { error?: string }) => {
         if (requestId !== contentRequestRef.current) return null;
         if (d.error) {
-          setError(d.error);
+          setError(d.error === "Not found" ? t("files.missingPath") : d.error);
           return null;
         }
         setError(null);
@@ -1229,7 +1229,7 @@ function TextFileViewer({
         setError(String(e));
         return null;
       });
-  }, [sourceSessionId]);
+  }, [sourceSessionId, t]);
 
   const fetchGitDiff = useCallback(async (targetPath: string) => {
     const requestId = ++gitDiffRequestRef.current;
@@ -1524,7 +1524,7 @@ function TextFileViewer({
   if (error && !isDeletedDiff) {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--palette-red-400)", fontSize: "var(--font-size-label)" }}>
-        {error}
+        {error === "Not found" ? t("files.missingPath") : error}
       </div>
     );
   }

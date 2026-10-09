@@ -155,6 +155,54 @@ try {
   assert.equal(fs.readFileSync(join(workspace, 'Destination', 'Created', 'Folder', 'nested.txt'), 'utf8'), 'nested content');
   assert.equal(await page.getByRole('checkbox', { checked: true }).count(), 0);
 
+  await page.getByRole('button', { name: 'Undo last move', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('button')?.disabled);
+  await page.getByRole('button', { name: 'Undo last move', exact: true }).waitFor({ state: 'hidden' });
+  assert.equal(fs.existsSync(join(workspace, 'Folder', 'nested.txt')), true);
+  assert.equal(fs.existsSync(join(workspace, 'Destination', 'Created', 'Folder')), false);
+
+  page = await fresh();
+  fs.writeFileSync(join(workspace, 'Destination', 'alpha.txt'), 'existing alpha');
+  fs.writeFileSync(join(workspace, 'Destination', 'beta.txt'), 'existing beta');
+  await checkbox(page, 'alpha.txt').click(); await checkbox(page, 'beta.txt').click();
+  await page.getByRole('button', { name: 'Move to…' }).click();
+  let conflictPicker = page.getByRole('dialog', { name: 'Choose folder' });
+  await conflictPicker.getByRole('button', { name: '📁 Destination', exact: true }).click();
+  await conflictPicker.getByRole('button', { name: 'Move here' }).click();
+  let conflictDialog = page.getByRole('dialog', { name: 'Name conflict' });
+  await conflictDialog.getByRole('checkbox', { name: 'Apply to remaining conflicts' }).check();
+  await conflictDialog.getByRole('button', { name: 'Keep both', exact: true }).click();
+  await page.getByRole('status').filter({ hasText: '2 succeeded' }).waitFor();
+  assert.equal(fs.readFileSync(join(workspace, 'Destination', 'alpha.txt'), 'utf8'), 'existing alpha');
+  assert.equal(fs.readFileSync(join(workspace, 'Destination', 'alpha (1).txt'), 'utf8'), 'alpha content');
+  assert.equal(fs.readFileSync(join(workspace, 'Destination', 'beta (1).txt'), 'utf8'), 'beta content');
+  fs.writeFileSync(join(workspace, 'alpha.txt'), 'new original');
+  await page.getByRole('button', { name: 'Undo last move', exact: true }).click();
+  conflictDialog = page.getByRole('dialog', { name: 'Name conflict' });
+  await conflictDialog.getByRole('button', { name: 'Keep both', exact: true }).click();
+  await page.getByRole('button', { name: 'Undo last move', exact: true }).waitFor({ state: 'hidden' });
+  assert.equal(fs.readFileSync(join(workspace, 'alpha.txt'), 'utf8'), 'new original');
+  assert.equal(fs.readFileSync(join(workspace, 'alpha (1).txt'), 'utf8'), 'alpha content');
+  assert.equal(fs.readFileSync(join(workspace, 'beta.txt'), 'utf8'), 'beta content');
+
+  page = await fresh();
+  fs.writeFileSync(join(workspace, 'Destination', 'beta.txt'), 'existing');
+  await checkbox(page, 'alpha.txt').click(); await checkbox(page, 'beta.txt').click();
+  await page.getByRole('button', { name: 'Move to…' }).click();
+  conflictPicker = page.getByRole('dialog', { name: 'Choose folder' });
+  await conflictPicker.getByRole('button', { name: '📁 Destination', exact: true }).click();
+  await conflictPicker.getByRole('button', { name: 'Move here' }).click();
+  conflictDialog = page.getByRole('dialog', { name: 'Name conflict' });
+  assert.match(await conflictDialog.textContent(), /Completed moves are kept/);
+  await conflictDialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await page.getByRole('status').filter({ hasText: '1 succeeded' }).waitFor();
+  assert.equal(fs.existsSync(join(workspace, 'alpha.txt')), false);
+  assert.equal(fs.existsSync(join(workspace, 'beta.txt')), true);
+  assert.equal(await checkbox(page, 'beta.txt').isChecked(), true);
+  await page.getByRole('button', { name: 'Undo last move', exact: true }).click();
+  await page.getByRole('button', { name: 'Undo last move', exact: true }).waitFor({ state: 'hidden' });
+  assert.equal(fs.existsSync(join(workspace, 'alpha.txt')), true);
+
   page = await fresh({ width: 390, height: 844 });
   await checkbox(page, 'alpha.txt').click();
   await page.getByRole('button', { name: 'Move to…' }).click();
@@ -182,7 +230,7 @@ try {
   assert.deepEqual(serverErrors, []);
   assert.deepEqual(browserErrors, []);
   assert.equal(requests.some(request => request.path.startsWith('/api/agent')), false);
-  console.log('File explorer browser acceptance passed (selection, references, mkdir, move, mobile deletion).');
+  console.log('File explorer browser acceptance passed (selection, references, mkdir, move, conflict choices, cancellation, undo, mobile deletion).');
 } catch (error) {
   await activePage?.screenshot({ path: join(output, 'failure.png'), fullPage: true });
   await context?.tracing.stop({ path: join(output, 'failure-trace.zip') });
