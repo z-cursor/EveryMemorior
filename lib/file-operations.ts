@@ -22,7 +22,11 @@ function fingerprint(value: string): string {
     hash.update(`${entry.slice(value.length)}:${stat.dev}:${stat.ino}:${stat.mode}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`);
     if (stat.isSymbolicLink()) hash.update(fs.readlinkSync(entry));
     else if (stat.isDirectory()) for (const name of fs.readdirSync(entry).sort()) visit(path.join(entry, name));
-    else if (stat.isFile()) hash.update(fs.readFileSync(entry));
+    else if (stat.isFile()) {
+      const fd = fs.openSync(entry, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      try { const buffer = Buffer.allocUnsafe(64 * 1024); let count: number; while ((count = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, count)); }
+      finally { fs.closeSync(fd); }
+    }
     else throw new Error('Unsupported item inside directory');
   }
   visit(value); return hash.digest('hex');
