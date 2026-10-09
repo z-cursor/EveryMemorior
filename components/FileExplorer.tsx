@@ -1,6 +1,9 @@
 "use client";
 
-import { forwardRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef, type CSSProperties } from "react";
+import { forwardRef, useContext, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef, type CSSProperties } from "react";
+import { FileDirectoryPicker } from "./FileDirectoryPicker";
+import { FileSelectionContext, FileSelectionCheckbox } from "./FileSelection";
+import { useFileOperations } from "@/hooks/useFileOperations";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import {
   encodeFilePathForApi,
@@ -281,6 +284,7 @@ function TreeNode({
   changedDirectoryPaths: Set<string>;
   t: Translate;
 }) {
+  const selection = useContext(FileSelectionContext);
   const open = expandedPaths.has(node.fullPath);
   const highlighted = highlightedPaths.has(node.fullPath);
   const normalizedPath = normalizeFilePathSlashes(node.fullPath);
@@ -328,7 +332,9 @@ function TreeNode({
   return (
     <div>
       <div
-        onClick={handleClick}
+        data-file-path={node.fullPath}
+        data-file-directory={node.isDir}
+        onClick={(event) => { if(event.ctrlKey || event.metaKey || event.shiftKey) { selection?.toggle(node.fullPath,event.shiftKey); return; } handleClick(); }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         style={{
@@ -345,6 +351,7 @@ function TreeNode({
           userSelect: "none",
         }}
       >
+        <FileSelectionCheckbox path={node.fullPath} label={t("files.selectEntry", {name:node.name})} />
         {node.isDir && (
           <svg
             width="10" height="10" viewBox="0 0 10 10" fill="none"
@@ -550,6 +557,54 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 }, ref) {
   const { t } = useI18n();
   const [roots, setRoots] = useState<FileNode[]>([]);
+  const [selected,setSelected]=useState<Set<string>>(new Set());
+  const selectionAnchor=useRef<string|null>(null);
+  const explorerRef=useRef<HTMLDivElement>(null);
+  const [movePicker,setMovePicker]=useState(false);
+  const [deletePaths,setDeletePaths]=useState<string[]|null>(null);
+  const {
+    busy: operationBusy,
+    results: operationResults,
+    error: operationError,
+    perform: performOperation,
+    setResults: setOperationResults,
+    setError: setOperationError,
+  } = useFileOperations(cwd, (successful, target) => {
+    setSelected(previous => new Set([...previous].filter(p =>
+      !successful.some(result => p === result.source || p.startsWith(result.source + '/'))
+    )));
+    setTreeRefreshKey(value => value + 1);
+    if (target) {
+      setExpandedPaths(previous => new Set([...previous, target]));
+      setHighlightedPaths(new Set(successful.flatMap(result => result.destination ? [result.destination] : [])));
+    }
+  });
+  const visiblePaths = () => Array.from(
+    explorerRef.current?.querySelectorAll<HTMLElement>('[data-file-path]') || []
+  ).map(element => element.dataset.filePath!);
+
+  function toggleSelection(path: string, shift: boolean) {
+    const visible = visiblePaths();
+    const start = selectionAnchor.current ? visible.indexOf(selectionAnchor.current) : -1;
+    const end = visible.indexOf(path);
+    setSelected(previous => {
+      const next = new Set(previous);
+      if (shift && start >= 0 && end >= 0) {
+        visible.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(value => next.add(value));
+      } else if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+    selectionAnchor.current = path;
+  }
+
+  function normalizedSelection(paths: string[]) {
+    return paths.filter(path => !paths.some(other => path !== other && path.startsWith(other + '/')));
+  }
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
@@ -573,6 +628,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const directoryInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const [draggingFiles, setDraggingFiles] = useState(false);
+  useEffect(()=>{setSelected(new Set());selectionAnchor.current=null;setMovePicker(false);setDeletePaths(null);setOperationResults([]);setOperationError('');},[cwd,searchQuery,fileSearchOpen,setOperationResults,setOperationError]);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
   const hasSearchQuery = searchQuery.trim().length > 0;
@@ -849,7 +905,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [cwd, onAtMentions, uploadSummary]);
 
   return (
-    <div style={{ minHeight: "100%", position: "relative" }}
+    <FileSelectionContext.Provider value={{selected,toggle:toggleSelection}}>
+    <div ref={explorerRef} style={{ minHeight: "100%", position: "relative" }}
       onDragEnter={(event) => {
         if (!Array.from(event.dataTransfer.types).includes("Files")) return;
         event.preventDefault();
@@ -873,6 +930,14 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         setDraggingFiles(false);
         void prepareUpload(Array.from(event.dataTransfer.files));
       }}>
+      <div style={{padding:8,display:'flex',gap:5,flexWrap:'wrap'}}>
+        <button onClick={()=>setSelected(new Set(visiblePaths()))}>{t('files.selectVisible')}</button><button onClick={()=>setSelected(new Set())}>{t('files.clearSelection')}</button>
+        {selected.size>0&&<><span>{t('files.selectionCount',{count:selected.size})}</span><button disabled={!onAtMentions} onClick={()=>onAtMentions?.([...selected].map(p=>getRelativeFilePath(p,cwd)))}>{t('files.referenceSelected')}</button><button disabled={operationBusy} onClick={()=>setMovePicker(true)}>{t('files.moveTo')}</button><button disabled={operationBusy} onClick={()=>setDeletePaths(normalizedSelection([...selected]))}>{t('files.delete')}</button></>}
+      </div>
+      {movePicker&&<FileDirectoryPicker cwd={cwd} disabledPaths={[...selected].filter(p=>explorerRef.current?.querySelector(`[data-file-path="${CSS.escape(p)}"]`)?.getAttribute('data-file-directory')==='true')} onCancel={()=>setMovePicker(false)} onSelect={target=>{setMovePicker(false);void performOperation('move',[...selected],target);}}/>}
+      {deletePaths&&<div role="dialog" aria-modal="true" aria-label={t('files.delete')} style={{position:'fixed',inset:0,zIndex:100,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',color:'var(--text)',maxWidth:'90vw'}}><p>{t('files.batchDeleteWarning')}</p><ul>{deletePaths.map(p=><li key={p}>{getRelativeFilePath(p,cwd)}</li>)}</ul><button onClick={()=>setDeletePaths(null)}>{t('files.cancel')}</button><button onClick={()=>{const paths=deletePaths;setDeletePaths(null);void performOperation('delete',paths);}}>{t('files.delete')}</button></div></div>}
+      {operationError&&<p role="alert">{operationError}</p>}
+      {operationResults.length>0&&<div role="status" style={{padding:8}}>{t('files.operationSummary',{success:operationResults.filter(r=>r.status==='success').length,skipped:operationResults.filter(r=>r.status==='skipped').length,failed:operationResults.filter(r=>r.status==='failed'||r.status==='conflict').length})}{operationResults.map(r=><div key={r.source} style={{overflowWrap:'anywhere'}}>{getRelativeFilePath(r.source,cwd)} → {r.destination?getRelativeFilePath(r.destination,cwd):''} {r.error}</div>)}</div>}
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
       <input ref={directoryInputRef} type="file" multiple hidden {...({ webkitdirectory: "" } as unknown as React.InputHTMLAttributes<HTMLInputElement>)} onChange={handleUploadInput} />
       {draggingFiles && <div role="status" style={{ position: "absolute", inset: 4, zIndex: 5, display: "grid", placeItems: "center", border: "2px dashed var(--accent)", borderRadius: "var(--radius-panel)", background: "var(--bg-panel)", color: "var(--accent)", fontSize: "var(--font-size-control)", pointerEvents: "none" }}>{t("files.dropToUpload")}</div>}
@@ -1118,5 +1183,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
     </div>
+    </FileSelectionContext.Provider>
   );
 });

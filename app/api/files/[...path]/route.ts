@@ -1,3 +1,4 @@
+import { PROTECTED_FILE_NAMES } from "@/lib/file-operations";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
@@ -32,11 +33,7 @@ import { authorizeAgentSessionRequest, tenantWorkspaceRootsForRequest } from "@/
 import { canManageHostConfiguration, requireTenantSession } from "@/lib/tenant-auth";
 import { workspaceErrorMessageForClient, workspacePathFromClient, workspacePathToClient } from "@/lib/tenant-workspace";
 
-const IGNORED_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store", ".git",
-]);
+const IGNORED_NAMES = PROTECTED_FILE_NAMES;
 
 const IGNORED_SUFFIXES = [".pyc"];
 
