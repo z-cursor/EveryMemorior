@@ -323,6 +323,8 @@ export const zhTWLocale: LocalePlugin = {
     "files.conflictSummary": "{count} 個檔案已存在：{files}",
     "files.cannotReplace": "無法取代：{files}",
     "files.replace": "取代",
+    "files.uploadHere": "上傳到這裡",
+    "files.uploadKeepBoth": "保留兩者（自動改名）",
     "files.skipExisting": "略過現有檔案",
     "files.cancel": "取消",
     "files.checking": "正在檢查檔案",

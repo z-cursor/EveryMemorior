@@ -347,6 +347,8 @@ export const enLocale: LocalePlugin = {
     "files.conflictSummary": "{count} file{countSuffix} already exist: {files}",
     "files.cannotReplace": "Cannot replace: {files}",
     "files.replace": "Replace",
+    "files.uploadHere": "Upload here",
+    "files.uploadKeepBoth": "Keep both (rename)",
     "files.skipExisting": "Skip existing",
     "files.cancel": "Cancel",
     "files.checking": "Checking files",
