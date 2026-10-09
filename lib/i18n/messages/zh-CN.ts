@@ -338,6 +338,8 @@ export const zhCNLocale: LocalePlugin = {
     "files.conflictSummary": "已有 {count} 个文件：{files}",
     "files.cannotReplace": "无法替换：{files}",
     "files.replace": "替换",
+    "files.uploadHere": "上传到这里",
+    "files.uploadKeepBoth": "保留两者（自动改名）",
     "files.skipExisting": "跳过已有文件",
     "files.cancel": "取消",
     "files.checking": "正在检查文件",
