@@ -3,6 +3,8 @@
 import { forwardRef, useContext, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef, type CSSProperties } from "react";
 import { FileDirectoryPicker } from "./FileDirectoryPicker";
 import { FileSelectionContext, FileSelectionCheckbox } from "./FileSelection";
+import { useFileExplorerDrag } from "@/hooks/useFileExplorerDrag";
+import { FileDragTargetContext } from "./FileDragContext";
 import { useFileOperations } from "@/hooks/useFileOperations";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import {
@@ -291,6 +293,7 @@ function TreeNode({
   t: Translate;
 }) {
   const selection = useContext(FileSelectionContext);
+  const dropTarget = useContext(FileDragTargetContext) === node.fullPath;
   const open = expandedPaths.has(node.fullPath);
   const highlighted = highlightedPaths.has(node.fullPath);
   const normalizedPath = normalizeFilePathSlashes(node.fullPath);
@@ -311,7 +314,8 @@ function TreeNode({
       setChildren(entries);
       setLoaded(true);
     } catch {
-      // ignore
+      // A refresh can retry; avoid a render-driven retry loop for an inaccessible directory.
+      setLoaded(true);
     } finally {
       setLoading(false);
     }
@@ -324,6 +328,8 @@ function TreeNode({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken]);
+
+  useEffect(() => { if (open && !loaded && !loading) void loadChildren(); }, [open, loaded, loading, loadChildren]);
 
   const handleClick = useCallback(() => {
     if (node.isDir) {
@@ -338,6 +344,9 @@ function TreeNode({
   return (
     <div>
       <div
+        draggable
+        data-file-drop-active={dropTarget || undefined}
+        data-file-highlighted={highlighted || undefined}
         data-file-path={node.fullPath}
         data-file-directory={node.isDir}
         onClick={(event) => { if(event.ctrlKey || event.metaKey || event.shiftKey) { selection?.toggle(node.fullPath,event.shiftKey); return; } handleClick(); }}
@@ -352,7 +361,8 @@ function TreeNode({
           paddingRight: 8,
           height: 24,
           cursor: "pointer",
-          background: hovered ? "var(--bg-hover)" : "transparent",
+          background: dropTarget ? "color-mix(in srgb, var(--accent) 20%, var(--bg-panel))" : hovered ? "var(--bg-hover)" : "transparent",
+          outline: dropTarget ? "2px solid var(--accent)" : undefined,
           borderRadius: "var(--radius-sm)",
           userSelect: "none",
         }}
@@ -584,9 +594,22 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       !successful.some(result => p === result.source || p.startsWith(result.source + '/'))
     )));
     setTreeRefreshKey(value => value + 1);
-    if (target) {
-      setExpandedPaths(previous => new Set([...previous, target]));
-      setHighlightedPaths(new Set(successful.flatMap(result => result.destination ? [result.destination] : [])));
+    const destinations = successful.flatMap(result => result.destination ? [result.destination] : []);
+    if (destinations.length) {
+      setExpandedPaths(previous => {
+        const next = new Set(previous);
+        for (const destination of destinations) {
+          let parent = getFileDirectory(destination);
+          while (parent && parent !== cwd && parent.startsWith(cwd.replace(/\/$/, '') + '/')) {
+            next.add(parent);
+            parent = getFileDirectory(parent);
+          }
+        }
+        if (target) next.add(target);
+        return next;
+      });
+      setSearchQuery('');
+      setHighlightedPaths(previous => new Set([...previous, ...destinations]));
     }
   });
   const visiblePaths = () => Array.from(
@@ -620,6 +643,22 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
+  useEffect(() => { if (operationBusy) setHighlightedPaths(new Set()); }, [operationBusy]);
+  useEffect(() => {
+    if (!highlightedPaths.size) return;
+    let clearHighlight: ReturnType<typeof setTimeout> | undefined;
+    const locate = () => {
+      const first = [...highlightedPaths].map(path => explorerRef.current?.querySelector<HTMLElement>(`[data-file-path="${CSS.escape(path)}"]`)).find(Boolean);
+      if (!first) return;
+      first.scrollIntoView({ block: 'nearest' });
+      observer.disconnect();
+      clearHighlight = setTimeout(() => setHighlightedPaths(new Set()), 2500);
+    };
+    const observer = new MutationObserver(locate);
+    if (explorerRef.current) observer.observe(explorerRef.current, {childList:true,subtree:true});
+    locate();
+    return () => {observer.disconnect();if(clearHighlight) clearTimeout(clearHighlight);};
+  }, [highlightedPaths]);
   const [gitFiles, setGitFiles] = useState<GitFileStatus[]>([]);
   const [gitLineStats, setGitLineStats] = useState({ additions: 0, deletions: 0 });
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
@@ -640,8 +679,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const directoryInputRef = useRef<HTMLInputElement>(null);
-  const dragDepthRef = useRef(0);
-  const [draggingFiles, setDraggingFiles] = useState(false);
+
   useEffect(()=>{setSelected(new Set());selectionAnchor.current=null;setMovePicker(false);setDeletePaths(null);setOperationResults([]);setOperationError('');},[cwd,searchQuery,fileSearchOpen,setOperationResults,setOperationError]);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
@@ -929,43 +967,41 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     );
   }, [cwd, onAtMentions, uploadSummary]);
 
+  const drag = useFileExplorerDrag({
+    container: explorerRef, cwd, selected, busy: operationBusy || uploadBusy,
+    expand: path => {
+      setExpandedPaths(previous => new Set([...previous, path]));
+      setSearchExpanded(previous => new Set([...previous, path]));
+    },
+    move: (paths, target) => { void performOperation('move', paths, target); },
+    upload: (files, target) => { void prepareUpload(files, target); },
+    uploadError: message => setUploadError(message),
+  });
+
   return (
     <FileSelectionContext.Provider value={{selected,toggle:toggleSelection}}>
-    <div ref={explorerRef} style={{ minHeight: "100%", position: "relative" }}
-      onDragEnter={(event) => {
-        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-        event.preventDefault();
-        dragDepthRef.current += 1;
-        setDraggingFiles(true);
-      }}
-      onDragOver={(event) => {
-        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-        event.preventDefault();
-        event.dataTransfer.dropEffect = uploadBusy ? "none" : "copy";
-      }}
-      onDragLeave={(event) => {
-        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-        if (dragDepthRef.current === 0) setDraggingFiles(false);
-      }}
-      onDrop={(event) => {
-        if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-        event.preventDefault();
-        dragDepthRef.current = 0;
-        setDraggingFiles(false);
-        void prepareUpload(Array.from(event.dataTransfer.files));
-      }}>
-      <div style={{padding:8,display:'flex',gap:5,flexWrap:'wrap'}}>
-        <button onClick={()=>setSelected(new Set(visiblePaths()))}>{t('files.selectVisible')}</button><button onClick={()=>setSelected(new Set())}>{t('files.clearSelection')}</button>
-        {selected.size>0&&<><span>{t('files.selectionCount',{count:selected.size})}</span><button disabled={!onAtMentions} onClick={()=>onAtMentions?.([...selected].map(p=>getRelativeFilePath(p,cwd)))}>{t('files.referenceSelected')}</button><button disabled={operationBusy} onClick={()=>setMovePicker(true)}>{t('files.moveTo')}</button><button disabled={operationBusy} onClick={()=>setDeletePaths(normalizedSelection([...selected]))}>{t('files.delete')}</button></>}
+    <FileDragTargetContext.Provider value={drag.feedback?.target ?? null}>
+    <div ref={explorerRef} data-file-explorer style={{ minHeight: "100%", position: "relative" }} {...drag.handlers}>
+      <div data-file-drop-root data-file-drop-active={drag.feedback?.target === cwd || undefined}
+        style={{padding:8,overflowWrap:'anywhere',fontSize:'var(--font-size-caption)',border:'1px dashed var(--border)',background:drag.feedback?.target === cwd?'color-mix(in srgb, var(--accent) 20%, var(--bg-panel))':undefined}}>
+        {t('files.rootDropTarget')} · {cwd}
+      </div>
+      {drag.feedback && <div style={{position:'sticky',top:0,height:0,zIndex:6,pointerEvents:'none'}}>
+        <div role="status" data-file-drag-feedback style={{position:'absolute',top:4,left:4,right:4,padding:8,background:'var(--bg-panel)',border:'1px solid var(--border)',borderRadius:'var(--radius-sm)',overflowWrap:'anywhere',fontSize:'var(--font-size-control)'}}>
+          {t(drag.feedback.operation === 'move' ? 'files.dragMove' : 'files.dragUpload', {count:drag.feedback.count})} · {drag.feedback.target || t('files.invalidDropTarget')}
+        </div>
+      </div>}
+      <div data-file-drop-controls style={{padding:8,display:'flex',gap:5,flexWrap:'wrap'}}>
+        <button className="file-operation-button" onClick={()=>setSelected(new Set(visiblePaths()))}>{t('files.selectVisible')}</button><button className="file-operation-button" onClick={()=>setSelected(new Set())}>{t('files.clearSelection')}</button>
+        {selected.size>0&&<><span style={{flexBasis:'100%',fontSize:'var(--font-size-caption)',color:'var(--text-muted)'}}>{t('files.selectionCount',{count:selected.size})}</span><button className="file-operation-button" disabled={!onAtMentions} onClick={()=>onAtMentions?.([...selected].map(p=>getRelativeFilePath(p,cwd)))}>{t('files.referenceSelected')}</button><button className="file-operation-button" disabled={operationBusy} onClick={()=>setMovePicker(true)}>{t('files.moveTo')}</button><button className="file-operation-button" disabled={operationBusy} onClick={()=>setDeletePaths(normalizedSelection([...selected]))}>{t('files.delete')}</button></>}
       </div>
       {movePicker&&<FileDirectoryPicker cwd={cwd} disabledPaths={[...selected].filter(p=>explorerRef.current?.querySelector(`[data-file-path="${CSS.escape(p)}"]`)?.getAttribute('data-file-directory')==='true')} onCancel={()=>setMovePicker(false)} onSelect={target=>{setMovePicker(false);void performOperation('move',[...selected],target);}}/>}
-      {deletePaths&&<div role="dialog" aria-modal="true" aria-label={t('files.delete')} style={{position:'fixed',inset:0,zIndex:100,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',color:'var(--text)',maxWidth:'90vw'}}><p>{t('files.batchDeleteWarning')}</p><ul>{deletePaths.map(p=><li key={p}>{getRelativeFilePath(p,cwd)}</li>)}</ul><button onClick={()=>setDeletePaths(null)}>{t('files.cancel')}</button><button onClick={()=>{const paths=deletePaths;setDeletePaths(null);void performOperation('delete',paths);}}>{t('files.delete')}</button></div></div>}
-      {canUndo && <button disabled={operationBusy} onClick={() => void undoOperation()}>{t('files.undoMove')}</button>}
-      {operationBusy && <button onClick={cancelOperation}>{t('files.cancelRemaining')}</button>}
-      {moveConflict && <div role="dialog" aria-modal="true" aria-label={t('files.moveConflict')} style={{position:'fixed',inset:0,zIndex:110,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',maxWidth:'90vw'}}><p>{t('files.moveConflict')}</p><p style={{overflowWrap:'anywhere'}}>{moveConflict.source} → {moveConflict.destination}</p><label><input type="checkbox" checked={applyRemaining} onChange={e=>setApplyRemaining(e.target.checked)}/>{t('files.applyRemaining')}</label><div><button onClick={()=>chooseConflict('rename',applyRemaining)}>{t('files.keepBoth')}</button><button onClick={()=>chooseConflict('skip',applyRemaining)}>{t('files.skipConflict')}</button><button onClick={()=>chooseConflict('cancel',false)}>{t('files.cancel')}</button></div><p>{t('files.cancelKeepsCompleted')}</p></div></div>}
+      {deletePaths&&<div role="dialog" aria-modal="true" aria-label={t('files.delete')} style={{position:'fixed',inset:0,zIndex:100,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',color:'var(--text)',maxWidth:'90vw'}}><p>{t('files.batchDeleteWarning')}</p><ul>{deletePaths.map(p=><li key={p}>{getRelativeFilePath(p,cwd)}</li>)}</ul><button className="file-operation-button" onClick={()=>setDeletePaths(null)}>{t('files.cancel')}</button><button className="file-operation-button" onClick={()=>{const paths=deletePaths;setDeletePaths(null);void performOperation('delete',paths);}}>{t('files.delete')}</button></div></div>}
+      {canUndo && <button className="file-operation-button" disabled={operationBusy} onClick={() => void undoOperation()}>{t('files.undoMove')}</button>}
+      {operationBusy && <button className="file-operation-button" onClick={cancelOperation}>{t('files.cancelRemaining')}</button>}
+      {moveConflict && <div role="dialog" aria-modal="true" aria-label={t('files.moveConflict')} style={{position:'fixed',inset:0,zIndex:110,background:'#0008',display:'grid',placeItems:'center'}}><div style={{padding:20,background:'var(--bg-panel)',maxWidth:'90vw'}}><p>{t('files.moveConflict')}</p><p style={{overflowWrap:'anywhere'}}>{moveConflict.source} → {moveConflict.destination}</p><label><input type="checkbox" checked={applyRemaining} onChange={e=>setApplyRemaining(e.target.checked)}/>{t('files.applyRemaining')}</label><div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:8}}><button className="file-operation-button" onClick={()=>chooseConflict('rename',applyRemaining)}>{t('files.keepBoth')}</button><button className="file-operation-button" onClick={()=>chooseConflict('skip',applyRemaining)}>{t('files.skipConflict')}</button><button className="file-operation-button" onClick={()=>chooseConflict('cancel',false)}>{t('files.cancel')}</button></div><p>{t('files.cancelKeepsCompleted')}</p></div></div>}
       {operationError&&<p role="alert">{operationError}</p>}
-      {operationResults.length>0&&<div role="status" style={{padding:8}}>{t('files.operationSummary',{success:operationResults.filter(r=>r.status==='success').length,skipped:operationResults.filter(r=>r.status==='skipped').length,failed:operationResults.filter(r=>r.status==='failed'||r.status==='conflict').length})}<span>{t('files.pendingCount',{count:operationResults.filter(r=>r.status==='pending').length})}</span>{operationResults.map(r=><div key={r.source} style={{overflowWrap:'anywhere'}}>{getRelativeFilePath(r.source,cwd)} → {r.destination?getRelativeFilePath(r.destination,cwd):''} {r.error}</div>)}</div>}
+      {operationResults.length>0&&<div role="status" style={{padding:8,fontSize:'var(--font-size-control)'}}>{t('files.operationSummary',{success:operationResults.filter(r=>r.status==='success').length,skipped:operationResults.filter(r=>r.status==='skipped').length,failed:operationResults.filter(r=>r.status==='failed'||r.status==='conflict').length})}<span style={{marginLeft:8}}>{t('files.pendingCount',{count:operationResults.filter(r=>r.status==='pending').length})}</span>{operationResults.map(r=><div key={r.source} style={{overflowWrap:'anywhere'}}>{getRelativeFilePath(r.source,cwd)} → {r.destination?getRelativeFilePath(r.destination,cwd):''} {r.error}</div>)}</div>}
       {uploadPicker && <FileDirectoryPicker key={cwd} cwd={cwd} finalAction={t("files.uploadHere")} onCancel={() => setUploadPicker(null)} onSelect={target => {
         chosenUploadTarget.current = { target, workspace: cwd };
         const picker = uploadPicker;
@@ -974,9 +1010,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       }} />}
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
       <input ref={directoryInputRef} type="file" multiple hidden {...({ webkitdirectory: "" } as unknown as React.InputHTMLAttributes<HTMLInputElement>)} onChange={handleUploadInput} />
-      {draggingFiles && <div role="status" style={{ position: "absolute", inset: 4, zIndex: 5, display: "grid", placeItems: "center", border: "2px dashed var(--accent)", borderRadius: "var(--radius-panel)", background: "var(--bg-panel)", color: "var(--accent)", fontSize: "var(--font-size-control)", pointerEvents: "none" }}>{t("files.dropToUpload")}</div>}
+
       {showUploadFeedback && (
-        <div style={{ padding: "var(--space-1-5) var(--space-2)", borderBottom: "var(--border-width) solid var(--border)" }}>
+        <div data-file-drop-controls style={{ padding: "var(--space-1-5) var(--space-2)", borderBottom: "var(--border-width) solid var(--border)" }}>
         {uploadBusy && (
           <div role="status" aria-live="polite" aria-label={uploadPhase === "checking" ? t("files.checking") : t("files.uploading", { progress: uploadProgress })}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-2)", minHeight: 14, color: "var(--text-muted)" }}>
@@ -1012,7 +1048,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
               </div>
             )}
             <div style={{ display: "flex", gap: 5, marginTop: 7 }}>
-              <button type="button" onClick={() => void performUpload(pendingConflict.files, "rename", pendingConflict.target, pendingConflict.workspace)}>{t("files.uploadKeepBoth")}</button>
+              <button className="file-operation-button" type="button" onClick={() => void performUpload(pendingConflict.files, "rename", pendingConflict.target, pendingConflict.workspace)}>{t("files.uploadKeepBoth")}</button>
               <button type="button" disabled={pendingConflict.conflicts.every(name => pendingConflict.nonReplaceable.includes(name))} onClick={() => void performUpload(pendingConflict.files, "overwrite", pendingConflict.target, pendingConflict.workspace)} style={{ height: 22, padding: "0 7px", border: "var(--border-width) solid var(--palette-red-500)", borderRadius: "var(--radius-sm)", background: "transparent", color: "var(--palette-red-500)", cursor: "pointer", fontSize: "var(--font-size-caption)" }}>
                 {t("files.replace")}
               </button>
@@ -1094,7 +1130,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       )}
 
       {fileSearchOpen && (
-      <div style={{ padding: "var(--space-1-5) var(--space-2)", borderBottom: "var(--border-width) solid var(--border)" }}>
+      <div data-file-drop-controls style={{ padding: "var(--space-1-5) var(--space-2)", borderBottom: "var(--border-width) solid var(--border)" }}>
         <div style={{ position: "relative" }}>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "var(--text-dim)", pointerEvents: "none" }}>
             <circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" />
@@ -1218,6 +1254,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
     </div>
+    </FileDragTargetContext.Provider>
     </FileSelectionContext.Provider>
   );
 });

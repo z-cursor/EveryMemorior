@@ -1,3 +1,5 @@
+import type { FileOperationResult } from "@/lib/file-operation-types";
+import { getFileName } from "@/lib/file-paths";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import type { Tab } from "./TabBar";
 
@@ -66,4 +68,24 @@ export function saveFileViewerState(
   const next = [...tabs];
   next[index] = { ...next[index], viewerState };
   return next;
+}
+
+/** Apply successful filesystem mappings to live previews, including directory descendants. */
+export function movedPreviewPath(path: string, results: FileOperationResult[]): string {
+  const match = results.find(result => result.status === 'success' && result.destination &&
+    (path === result.source || (result.isDir && path.startsWith(result.source + '/'))));
+  return match ? match.destination! + path.slice(match.source.length) : path;
+}
+
+export function remapMovedFileTabs(tabs: Tab[], results: FileOperationResult[]): Tab[] {
+  return tabs.map(tab => {
+    if (!tab.filePath) return tab;
+    const filePath = movedPreviewPath(tab.filePath, results);
+    return filePath === tab.filePath ? tab : {...tab, id: `file:${filePath}`, filePath,
+      label: getFileName(filePath), viewerRevision: (tab.viewerRevision ?? 0) + 1};
+  });
+}
+
+export function remapMovedActiveTab(id: string | null, results: FileOperationResult[]): string | null {
+  return id?.startsWith('file:') ? `file:${movedPreviewPath(id.slice(5), results)}` : id;
 }

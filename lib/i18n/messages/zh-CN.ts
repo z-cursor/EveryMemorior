@@ -5,7 +5,11 @@ export const zhCNLocale: LocalePlugin = {
   id: "zh-CN",
   label: "简体中文",
   messages: {
-    "files.selectEntry": "选中 {name}",
+    "files.rootDropTarget": "工作区根目录",
+    "files.dragMove": "移动 {count} 个条目",
+    "files.dragUpload": "上传 {count} 个条目",
+    "files.invalidDropTarget": "无法放置到这里",
+  "files.selectEntry": "选中 {name}",
     "files.selectVisible": "全选可见条目",
     "files.clearSelection": "清空选择",
     "files.selectionCount": "已选 {count} 项",

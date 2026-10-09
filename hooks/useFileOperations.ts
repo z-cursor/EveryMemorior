@@ -12,7 +12,11 @@ export function useFileOperations(cwd: string, onSuccess: (results: FileOperatio
   const currentWorkspace = useRef(cwd); currentWorkspace.current = cwd;
   const canceled = useRef(false);
   const resolveChoice = useRef<((value: { choice: Choice; remaining: boolean }) => void) | null>(null);
-  useEffect(() => () => { canceled.current = true; resolveChoice.current?.({ choice: 'cancel', remaining: false }); }, [cwd]);
+  useEffect(() => {
+    setUndoState(null);
+    setConflict(null);
+    return () => { canceled.current = true; resolveChoice.current?.({ choice: 'cancel', remaining: false }); };
+  }, [cwd]);
   function chooseConflict(choice: Choice, remaining: boolean) { resolveChoice.current?.({ choice, remaining }); resolveChoice.current = null; setConflict(null); }
   function cancel() { canceled.current = true; chooseConflict('cancel', false); }
   async function perform(operation: 'move' | 'delete' | 'undo', paths: string[], target?: string) {
