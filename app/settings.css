@@ -165,8 +165,12 @@
 }
 
 .config-sidebar-item[aria-current="page"] {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   background: var(--bg-selected);
   font-weight: 600;
+  box-shadow: 0 1px 0 var(--border);
 }
 
 .config-sidebar-item:disabled {
