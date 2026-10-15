@@ -16,6 +16,7 @@ Lint: `npm run lint`
 - A browser-only `Module ... factory is not available` overlay usually means that tab has a stale Turbopack/HMR graph; it does not prove the server or source is broken. First call the browser's explicit reload action, then compare the current server log and a direct HTTP/API request.
 - Restart only after the failure reproduces from a fresh page and the server-side checks also fail. Stop the exact dev process gracefully, move `.next` into a `mktemp -d` backup, and restart with the standard `npm run dev` command.
 - Do not use `next dev --webpack` as a fallback. This repository's development graph can fail on `undici` imports such as `node:console`; development is expected to use Turbopack.
+- For browser operations, use the installed `chrome-devtools-axi` skill and connect to the current machine's visible Chrome with AXI auto-connect. Preserve `CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1` and do not replace it with a remote `CHROME_DEVTOOLS_AXI_BROWSER_URL` or launch an isolated browser unless the user explicitly requests that behavior.
 - Next.js may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md` when `next dev` starts. Treat that as generated tooling output, verify it with `git status`, and do not include it in an unrelated feature commit.
 
 ---
