@@ -3,8 +3,9 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { containsProhibitedCompanionProfileContent, containsSensitiveCompanionInformation, normalizedOrdinaryCompanionMemory, ordinaryCompanionTopics, ORDINARY_COMPANION_TOPIC_LABELS } from "./companion-memory-policy";
-import { calculateCompanionTrialMetrics, passesCompanionTrialGate } from "./companion-quality";
+import { containsProhibitedCompanionProfileContent, containsSensitiveCompanionInformation, normalizedOrdinaryCompanionMemory, ordinaryCompanionTopics, ORDINARY_COMPANION_TOPIC_LABELS } from "./companion-memory-policy.ts";
+import { calculateCompanionTrialMetrics, passesCompanionTrialGate } from "./companion-quality.ts";
+import { resolveSkillRuntime } from "./skill-runtime.ts";
 
 export const TENANT_SCHEMA_VERSION = 10;
 
@@ -993,6 +994,37 @@ function validTenantSkillBuildStatus(value: TenantSkillBuildStatus | undefined):
   if (value === undefined) return undefined;
   if (!["pending", "building", "ready", "failed"].includes(value)) throw new Error("Invalid Skill build status");
   return value;
+}
+
+type RuntimeArtifact = {
+  runtimeImage: string | null;
+  imageDigest: string | null;
+  runtimeProfile: string | null;
+  dependencyCount: number | null;
+};
+
+function runtimeDependencyCount(manifest: Record<string, unknown>): number | null {
+  const value = manifest.runtimeDependencyCount;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function runtimeDependencyCountForRelease(release: Pick<TenantSkill, "manifest" | "storagePath" | "runtimeImage" | "imageDigest" | "lockfileDigest" | "runtimeProfile" | "buildStatus">): number | null {
+  const stored = runtimeDependencyCount(release.manifest);
+  if (stored !== null) return stored;
+  try {
+    return resolveSkillRuntime([release]).dependencyFiles.length;
+  } catch {
+    return null;
+  }
+}
+
+function runtimeArtifactsCompatible(current: RuntimeArtifact, published: RuntimeArtifact): boolean {
+  if (current.runtimeImage === published.runtimeImage
+    && current.imageDigest === published.imageDigest
+    && current.runtimeProfile === published.runtimeProfile) return true;
+  const isDependencyFreeNode = (artifact: RuntimeArtifact) => artifact.runtimeProfile === "node22" && artifact.dependencyCount === 0;
+  return (current.runtimeProfile === "node22-python3" && isDependencyFreeNode(published))
+    || (published.runtimeProfile === "node22-python3" && isDependencyFreeNode(current));
 }
 
 function visibleLineDiff(before: string, after: string): string {
@@ -2107,14 +2139,37 @@ export class TenantStore {
       throw new Error("Skill runtime artifact metadata is incomplete");
     }
     if (skill.manifest.runtimeRequired === true && skill.manifest.declarative !== true) {
-      const incompatible = this.database.prepare(`SELECT 1 FROM tenant_skills
+      const published = this.database.prepare(`SELECT storage_path, runtime_image, image_digest, lockfile_digest, runtime_profile, manifest_json FROM tenant_skills
         WHERE tenant_id = ? AND status = 'published' AND id <> ?
           AND json_extract(manifest_json, '$.runtimeRequired') = 1
-          AND runtime_image IS NOT NULL AND image_digest IS NOT NULL AND runtime_profile IS NOT NULL
-          AND (runtime_image <> ? OR image_digest <> ? OR runtime_profile <> ?)
-        LIMIT 1`).get(
-        context.tenantId, skillId, skill.runtimeImage, skill.imageDigest, skill.runtimeProfile,
-      );
+        `).all(context.tenantId, skillId) as Array<{
+          storage_path: string;
+          runtime_image: string | null;
+          image_digest: string | null;
+          lockfile_digest: string | null;
+          runtime_profile: string | null;
+          manifest_json: string;
+        }>;
+      const current: RuntimeArtifact = {
+        runtimeImage: skill.runtimeImage,
+        imageDigest: skill.imageDigest,
+        runtimeProfile: skill.runtimeProfile,
+        dependencyCount: runtimeDependencyCountForRelease(skill),
+      };
+      const incompatible = published.some((row) => !runtimeArtifactsCompatible(current, {
+        runtimeImage: row.runtime_image,
+        imageDigest: row.image_digest,
+        runtimeProfile: row.runtime_profile,
+        dependencyCount: runtimeDependencyCountForRelease({
+          storagePath: row.storage_path,
+          manifest: JSON.parse(row.manifest_json) as Record<string, unknown>,
+          runtimeImage: row.runtime_image,
+          imageDigest: row.image_digest,
+          lockfileDigest: row.lockfile_digest,
+          runtimeProfile: row.runtime_profile,
+          buildStatus: "ready",
+        }),
+      }));
       if (incompatible) throw new Error("Skill runtime artifact is incompatible with published releases");
     }
     const now = new Date().toISOString();

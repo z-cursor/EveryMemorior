@@ -16,9 +16,19 @@ Lint: `npm run lint`
 - A browser-only `Module ... factory is not available` overlay usually means that tab has a stale Turbopack/HMR graph; it does not prove the server or source is broken. First call the browser's explicit reload action, then compare the current server log and a direct HTTP/API request.
 - Restart only after the failure reproduces from a fresh page and the server-side checks also fail. Stop the exact dev process gracefully, move `.next` into a `mktemp -d` backup, and restart with the standard `npm run dev` command.
 - Do not use `next dev --webpack` as a fallback. This repository's development graph can fail on `undici` imports such as `node:console`; development is expected to use Turbopack.
+- For browser operations, use the installed `chrome-devtools-axi` skill and connect to the current machine's visible Chrome with AXI auto-connect. Preserve `CHROME_DEVTOOLS_AXI_AUTO_CONNECT=1` and do not replace it with a remote `CHROME_DEVTOOLS_AXI_BROWSER_URL` or launch an isolated browser unless the user explicitly requests that behavior.
 - Next.js may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md` when `next dev` starts. Treat that as generated tooling output, verify it with `git status`, and do not include it in an unrelated feature commit.
 
 ---
+
+## Delivery and tool rules
+
+- GitLab delivery runs from the authoritative server checkout. Check `glab --version` and the configured GitLab remote before creating a change request. Prefer `glab mr create` with an explicit `--target-branch main`; if `glab` is unavailable, use the GitLab API from the server with its configured credentials. Use the browser only when both server-side paths are unavailable or the user explicitly asks for browser interaction, then verify the resulting MR URL and target branch.
+- A server checkout with existing changes is a preservation boundary. Record `git status`, `git diff`, and untracked paths, save a rollback patch/archive, and commit or isolate the server changes before applying local commits. Apply local changes in small functional commits and resolve overlaps against the server version.
+- Preserve repository line endings during transfer. Use `git format-patch`/`git am`, `git apply`, or byte-preserving copy methods; inspect `git diff --stat` after every transfer. A whole-file diff caused only by line endings is a failed transfer that must be normalized before review.
+- Remote shell commands use a quoted script or a temporary script file when they contain `$`, `$(...)`, `:`, wildcards, loops, or nested quotes. Resolve the server Node path before running checks, and report the exact command when a shell expands it unexpectedly.
+- Browser automation uses the local visible Chrome through `chrome-devtools-axi` auto-connect. Keep one named AXI session, take a fresh snapshot immediately before UID actions, and prefer CSS selectors or `eval` for actions that span multiple CLI calls. Confirm visible state after each state-changing action.
+- Tests that mutate process-wide environment variables run with `--test-concurrency=1`. Run the narrow feature regression first, then the broader suite; classify unrelated baseline failures separately instead of presenting a partial run as green.
 
 ## Architecture
 
