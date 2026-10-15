@@ -156,7 +156,9 @@ async function validateChapter(caseRoot: string, chapter: number): Promise<{ bod
   const title = stringValue(chapterData.title);
   if (chapterData.chapter_order !== chapter || title !== CHAPTER_TITLES[chapter - 1] || !body) reasons.push("章节 JSON 与当前章节不一致");
   const txt = normalizeText(await readFile(chapterTxt, "utf8"));
-  if (txt !== normalizeText(`${CHAPTER_TITLES[chapter - 1]}\n\n${body}`)) reasons.push("章节 TXT 与 JSON 正文不一致");
+  const expectedBody = normalizeText(body);
+  const expectedWithTitle = normalizeText(`${CHAPTER_TITLES[chapter - 1]}\n\n${body}`);
+  if (txt !== expectedBody && txt !== expectedWithTitle) reasons.push("章节 TXT 与 JSON 正文不一致");
 
   const bodySha = sha256(body);
   const noPunctuationSha = sha256(withoutPunctuation(body));
@@ -186,6 +188,7 @@ export async function assembleBiographyBook(
   const caseData = await readJson(join(caseRoot, "case.json"));
   const subject = stringValue(caseData.subject_name) ?? stringValue(caseData.title);
   if (!subject) return { status: "blocked", reason: "案例缺少传主姓名", case_id: caseId };
+  if (/[\u0000-\u001F\u007F\r\n]/u.test(subject)) return { status: "blocked", reason: "传主姓名包含非法控制字符", case_id: caseId };
 
   const checked = await Promise.all(CHAPTER_TITLES.map((_, index) => validateChapter(caseRoot, index + 1)));
   const blockingChapters = checked
@@ -195,9 +198,11 @@ export async function assembleBiographyBook(
 
   const policy = await findPolicy(root, options.skillPaths ?? []);
   const minimum = Number((policy?.book as JsonObject | undefined)?.minimum);
+  const maximum = Number((policy?.book as JsonObject | undefined)?.technical_maximum);
   const visibleCharacterCount = checked.reduce((total, chapter) => total + visibleCount(chapter.body), 0);
   if (!Number.isFinite(minimum) || minimum <= 0) return { status: "blocked", reason: "缺少有效的 policies/chapter-lengths.json", case_id: caseId };
   if (visibleCharacterCount < minimum) return { status: "blocked", reason: `六章正文共 ${visibleCharacterCount} 字，低于整书最低 ${minimum} 字`, case_id: caseId };
+  if (Number.isFinite(maximum) && maximum > 0 && visibleCharacterCount > maximum) return { status: "blocked", reason: `六章正文共 ${visibleCharacterCount} 字，超过整书技术上限 ${maximum} 字`, case_id: caseId };
 
   const narrative = (caseData.narrative_config ?? {}) as JsonObject;
   const familyBiography = narrative.subject_type === "direct_relative" || narrative.biography_type === "family_biography" || narrative.narrative_person === "third";

@@ -196,20 +196,34 @@ export function resolveSkillRuntime(storageRoots: readonly string[] | readonly S
     throw new SkillRuntimeConfigurationError("Skill release storage is unavailable");
   }
   const roots = candidateRoots;
-  const manifests = roots.map(readRuntimeManifest).filter((manifest): manifest is RuntimeManifest => Boolean(manifest));
-  const releaseImages = releases.map((release) => release.image).filter((value): value is string => Boolean(value));
-  const images = [...new Set(releaseImages.length > 0
-    ? releaseImages
-    : manifests.map((manifest) => manifest.image).filter((value): value is string => Boolean(value)))];
-  const releaseDigests = releases.map((release) => release.imageDigest).filter((value): value is string => Boolean(value));
-  const digests = [...new Set((releaseDigests.length > 0
-    ? releaseDigests
-    : manifests.map((manifest) => manifest.imageDigest)).filter((value): value is string => Boolean(value)))];
-  const profiles = [...new Set([
-    ...manifests.map((manifest) => manifest.profile),
-    ...releases.map((release) => release.runtimeProfile ?? undefined),
-  ].filter((value): value is string => Boolean(value)))];
-  if (images.length > 1 || digests.length > 1 || profiles.length > 1) {
+  const manifestByRoot = new Map(roots.map((root) => [root, readRuntimeManifest(root)]));
+  const runtimeRecords = releases.map((release) => {
+    const root = resolve(release.storagePath);
+    const manifest = manifestByRoot.get(root);
+    return {
+      root,
+      profile: release.runtimeProfile ?? (typeof manifest?.profile === "string" ? manifest.profile : undefined),
+      image: release.image ?? (typeof manifest?.image === "string" ? manifest.image : undefined),
+      imageDigest: release.imageDigest ?? (typeof manifest?.imageDigest === "string" ? manifest.imageDigest : undefined),
+      dependencyCount: dependencyFiles(root).length,
+    };
+  });
+  const images = [...new Set(runtimeRecords.map((record) => record.image).filter((value): value is string => Boolean(value)))];
+  const digests = [...new Set(runtimeRecords.map((record) => record.imageDigest).filter((value): value is string => Boolean(value)))];
+  const profiles = [...new Set(runtimeRecords.map((record) => record.profile).filter((value): value is string => Boolean(value)))];
+  const artifactKeys = new Set(runtimeRecords.map((record) => `${record.image ?? ""}\0${record.imageDigest ?? ""}\0${record.profile ?? ""}`));
+  const superset = runtimeRecords.find((record) => record.profile === "node22-python3");
+  const supersetArtifactKeys = new Set(runtimeRecords
+    .filter((record) => record.profile === "node22-python3")
+    .map((record) => `${record.image ?? ""}\0${record.imageDigest ?? ""}\0${record.profile ?? ""}`));
+  const supersetKey = superset
+    ? `${superset.image ?? ""}\0${superset.imageDigest ?? ""}\0${superset.profile ?? ""}`
+    : undefined;
+  const dependencyFreeNodeSubset = superset !== undefined && supersetArtifactKeys.size === 1 && runtimeRecords.every((record) =>
+    (record.profile === "node22-python3"
+      && `${record.image ?? ""}\0${record.imageDigest ?? ""}\0${record.profile ?? ""}` === supersetKey)
+    || (record.profile === "node22" && record.dependencyCount === 0));
+  if (artifactKeys.size > 1 && !dependencyFreeNodeSubset) {
     throw new SkillRuntimeConfigurationError("runtime artifact not ready: Skill releases require incompatible runtime profiles");
   }
 
@@ -248,12 +262,13 @@ export function resolveSkillRuntime(storageRoots: readonly string[] | readonly S
   const defaultImage = requiresImage
     ? process.env.PI_WEB_SKILL_RUNTIME_IMAGE?.trim() || DEFAULT_SKILL_RUNTIME_IMAGE
     : undefined;
+  const selectedArtifact = dependencyFreeNodeSubset ? superset : runtimeRecords.find((record) => record.image || record.imageDigest);
   return {
-    image: images[0] ?? defaultImage,
-    imageDigest: digests[0] ?? (requiresImage
+    image: selectedArtifact?.image ?? images[0] ?? defaultImage,
+    imageDigest: selectedArtifact?.imageDigest ?? digests[0] ?? (requiresImage
       ? process.env.PI_WEB_SKILL_RUNTIME_IMAGE_DIGEST?.trim()
       : process.env.PI_WEB_SANDBOX_IMAGE_DIGEST?.trim()),
-    profile: profiles[0] ?? (hasPython && hasNode ? "node22-python3" : hasPython ? "python3" : hasNode ? "node22" : "shell"),
+    profile: selectedArtifact?.profile ?? profiles[0] ?? (hasPython && hasNode ? "node22-python3" : hasPython ? "python3" : hasNode ? "node22" : "shell"),
     releaseDigest: createHash("sha256").update(releaseDigest).update("\0").update(lockfileDigest).digest("hex"),
     dependencyDigest,
     lockfileDigest,

@@ -7,7 +7,7 @@ import {
   DEFAULT_SKILL_RUNTIME_IMAGE,
   resolveSkillRuntime,
   type SkillRuntimeDescriptor,
-} from "./skill-runtime";
+} from "./skill-runtime.ts";
 
 const MAX_DEPENDENCY_CONTEXT_BYTES = 2 * 1024 * 1024;
 const MAX_BUILD_LOG_BYTES = 2 * 1024 * 1024;

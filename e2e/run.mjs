@@ -131,8 +131,12 @@ try {
   server.stdout.pipe(serverLog, { end: false });
   server.stderr.pipe(serverLog, { end: false });
 
+  let authCookie = "";
   async function api(path, status = 200) {
-    const response = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(30_000) });
+    const response = await fetch(`${base}${path}`, {
+      headers: authCookie ? { Cookie: authCookie } : undefined,
+      signal: AbortSignal.timeout(30_000),
+    });
     assert.equal(response.status, status, path);
     return response.json();
   }
@@ -141,9 +145,26 @@ try {
   while (true) {
     if (serverError) throw serverError;
     assert.equal(server.exitCode, null, "Server exited before readiness; see server.log");
-    const response = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
+    const response = await fetch(`${base}/api/web-auth`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
     if (response?.ok) {
-      const { sessions } = await response.json();
+      const setup = await fetch(`${base}/api/web-auth`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "setup",
+          tenantName: "E2E Tenant",
+          tenantSlug: "e2e-tenant",
+          displayName: "E2E Owner",
+          email: "e2e@example.test",
+          password: "e2e-password",
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      assert.equal(setup.status, 200, `E2E tenant setup failed: ${await setup.text()}`);
+      const setCookie = setup.headers.get("set-cookie");
+      assert.match(setCookie ?? "", /pi_web_tenant_session=/, "E2E setup must return a tenant session cookie");
+      authCookie = setCookie.split(";", 1)[0];
+      const { sessions } = await api("/api/sessions");
       assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED].sort());
       break;
     }
@@ -177,6 +198,8 @@ try {
   browser = await chromium.launch();
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     context = await browser.newContext({ viewport, locale: "en-US" });
+    const cookieValue = authCookie.slice(authCookie.indexOf("=") + 1);
+    await context.addCookies([{ name: "pi_web_tenant_session", value: cookieValue, domain: "127.0.0.1", path: "/" }]);
     await context.tracing.start({ screenshots: true, snapshots: true });
     page = await context.newPage();
     page.setDefaultTimeout(30_000);

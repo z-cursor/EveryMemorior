@@ -5,9 +5,8 @@ import { basename, dirname, isAbsolute, join, posix, relative, resolve } from "n
 import JSZip from "jszip";
 import * as yaml from "js-yaml";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { resolveSkillRuntime } from "./skill-runtime";
-import { buildSkillRuntime } from "./skill-runtime-builder";
-// @ts-expect-error Node's strip-types test runner resolves the extension explicitly.
+import { resolveSkillRuntime } from "./skill-runtime.ts";
+import { buildSkillRuntime } from "./skill-runtime-builder.ts";
 import { getTenantStore, type AuthenticatedTenantSession, type TenantSkill } from "./tenant-store.ts";
 
 const MAX_ARCHIVE_BYTES = 10 * 1024 * 1024;
@@ -181,7 +180,10 @@ export async function uploadTenantSkill(session: AuthenticatedTenantSession, arc
       installedStorage = true;
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
-      if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
+      // Windows reports an existing directory as EPERM from fs.rename(),
+      // while POSIX reports EEXIST/ENOTEMPTY. Treat all three as the
+      // deterministic-release collision path, then verify exact contents.
+      if (code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "EPERM") throw error;
       if (!isDirectory(storagePath)) throw new TenantSkillUploadError("Skill release storage is unavailable");
       if (!(await storageMatchesArchive(storagePath, normalized, buffers))) {
         throw new TenantSkillUploadError("Skill release storage already exists with different contents");
@@ -203,6 +205,7 @@ export async function uploadTenantSkill(session: AuthenticatedTenantSession, arc
       declarative: meta.manifest.declarative === true,
     }]);
     meta.manifest.runtimeRequired = runtime.requiresImage;
+    meta.manifest.runtimeDependencyCount = runtime.dependencyFiles.length;
     const store = getTenantStore();
     let draft: TenantSkill;
     try {
